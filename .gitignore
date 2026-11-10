@@ -1,0 +1,9 @@
+# 本地私有指令，不入库
+CLAUDE.md
+
+# 脚本旧版备份
+collect_hw_info.sh.bak
+
+# 脚本运行产物（报告与残留锁文件）
+*.xls
+*.xls.lock
