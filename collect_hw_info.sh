@@ -27,7 +27,7 @@ SCRIPT_NAME=$(basename "$0")
 
 # ---- 硬盘性能测试配置 ----
 DISK_TEST_SIZE="10G"          # 默认测试文件大小（可在此修改）
-DISK_DEVICE=""                # 测试磁盘设备（通过 -d 指定）
+DISK_DEVICES=()              # 测试磁盘设备列表（-d 可多次指定，开跑前去重保序）
 DISK_DEVICE_SET=0             # 用户是否显式给了 -d（决定是否做前置块设备校验）
 TEST_FILE_DIR="/tmp"          # 测试文件写入目录
 TEST_FILE_DIR_SET=0           # 用户是否显式给了 -p（默认 /tmp 不做前置校验）
@@ -130,7 +130,7 @@ show_help() {
   -h, --help                    显示此帮助
   -H, --help-full               显示完整说明（离线部署 / SMART / 环境变量 / 排错）
   -v, --version                 显示版本号
-  -d, --disk <设备>             待测硬盘，如 /dev/sda
+  -d, --disk <设备>             待测硬盘，可多次指定（自动去重），如 -d /dev/sda -d /dev/sdb
   -s, --size <大小>             测试文件大小，默认 ${DISK_TEST_SIZE_DEFAULT}（K/M/G，大小写均可）
   -p, --test-path <目录>        测试文件写入目录，默认 ${TEST_FILE_DIR_DEFAULT}
   -o, --output <文件>           指定输出 .xls 文件（默认 <输出目录>/collect_hw_info.xls）
@@ -289,7 +289,7 @@ while [ $# -gt 0 ]; do
             OUTPUT_FILE_OVERRIDE="$2"; OUTPUT_FILE_OVERRIDE_SET=1; shift 2 ;;
         -d|--disk)
             need_arg "-d/--disk" "$2" "指定磁盘设备路径"
-            DISK_DEVICE="$2"; DISK_DEVICE_SET=1; shift 2 ;;
+            DISK_DEVICES+=("$2"); DISK_DEVICE_SET=1; shift 2 ;;
         -s|--size)
             need_arg "-s/--size" "$2" "指定测试文件大小"
             # 单位统一成大写，下游 parse_size_mb / fio / 报表文案口径一致
@@ -311,8 +311,25 @@ done
 
 # -d/-p 真实性校验放在开跑前：性能测试参数错误应立即 exit 2，
 # 而不是采集完全部硬件、跑完测试后才在报表里记一笔（批量脚本会误判成败）
-if [ "$DISK_DEVICE_SET" -eq 1 ] && [ ! -b "$DISK_DEVICE" ]; then
-    usage_error "-d 指定的不是块设备: ${DISK_DEVICE}"
+if [ "$DISK_DEVICE_SET" -eq 1 ]; then
+    # O(n²) 循环去重（保序）：兼容 bash 3.2，不依赖关联数组；
+    # -d /dev/sda -d /dev/sda 只测一次
+    _uniq_disks=()
+    for _d in "${DISK_DEVICES[@]}"; do
+        _dup=0
+        for _u in "${_uniq_disks[@]}"; do
+            [ "$_u" = "$_d" ] && { _dup=1; break; }
+        done
+        [ "$_dup" -eq 0 ] && _uniq_disks+=("$_d")
+    done
+    DISK_DEVICES=("${_uniq_disks[@]}")
+    unset _uniq_disks _d _u _dup
+    # 打印实际待测清单：批量核对"我写什么就测什么"，去重结果可观测
+    log_info "待测硬盘(去重后): ${DISK_DEVICES[*]}"
+    for _d in "${DISK_DEVICES[@]}"; do
+        [ -b "$_d" ] || usage_error "-d 指定的不是块设备: ${_d}"
+    done
+    unset _d
 fi
 if [ "$TEST_FILE_DIR_SET" -eq 1 ]; then
     if [ ! -d "$TEST_FILE_DIR" ] || [ ! -w "$TEST_FILE_DIR" ]; then
@@ -352,7 +369,10 @@ check_tools() {
 # =============================================================================
 xml_esc() {
     [ -z "$1" ] && echo "" && return
-    printf '%s\n' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' | tr -d '\x00-\x1F'
+    # 删控制字符必须用八进制 \000-\037：GNU tr 不支持 \xHH 十六进制语法，
+    # '\x00-\x1F' 会被解析成字符范围 0-x（0x30..0x78），把数字、大写字母、
+    # a-w 和冒号一并删光（中文 UTF-8 字节与 y/z 幸存，单元格值只剩残骸）
+    printf '%s\n' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' | tr -d '\000-\037'
 }
 
 get_system_sn() {
@@ -721,6 +741,12 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
 cleanup_smart_runtime() {
     if [ "$SMART_PROBE_IS_TMP" -eq 1 ] && [ -n "$SMART_PROBE_PY" ] && [ -f "$SMART_PROBE_PY" ]; then
         rm -f "$SMART_PROBE_PY" 2>/dev/null
+    fi
+    # 锁文件只是 flock 的载体，进程退出即解锁；不删会永久残留在输出目录
+    # （U盘交付场景下尤其显眼），必须由持有者自己清理
+    if [ -n "${LOCK_FILE:-}" ]; then
+        exec 200>&- 2>/dev/null
+        rm -f "$LOCK_FILE" 2>/dev/null
     fi
 }
 trap cleanup_smart_runtime EXIT INT TERM
@@ -3530,14 +3556,14 @@ main() {
     collect_gpu_info;     add_blank
     collect_driver_versions; add_blank
 
-    if [ -n "$DISK_DEVICE" ]; then
-        collect_disk_perf_info "$DISK_DEVICE"
+    local _perf_disk
+    for _perf_disk in "${DISK_DEVICES[@]}"; do
+        collect_disk_perf_info "$_perf_disk"
         add_blank
-    fi
-
+    done
     # 分区表是用户要的"最后底下那一份"：放在可选性能测试段之后、页脚之前
     local part_no="八"
-    [ -n "$DISK_DEVICE" ] && part_no="九"
+    [ "${#DISK_DEVICES[@]}" -gt 0 ] && part_no="九"
     collect_partition_info "$part_no"
     add_blank
 
@@ -3548,6 +3574,9 @@ main() {
     # （老系统/精简环境可能没 flock，不能因此拦住导出）
     if command -v flock &>/dev/null; then
         exec 200>"${OUTPUT_FILE}.lock"
+        # 故意不用 local：cleanup_smart_runtime 由 EXIT trap 触发时 main 已返回，
+        # local 变量届时已销毁，锁文件就删不掉了
+        LOCK_FILE="${OUTPUT_FILE}.lock"
         if ! flock -n 200; then
             record_error "无法获取写锁: ${OUTPUT_FILE} 正被其他实例写入"
             summary_errors
