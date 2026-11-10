@@ -2015,7 +2015,10 @@ get_disk_brand() {
 # 不把 WWN 当 SN：vpd_pg80 是 Unit Serial Number，vpd_pg83 是设备标识（含 WWN），不用。
 # =============================================================================
 get_disk_serial() {
-    local name="$1" dev="/dev/${name}" sn="" src="" u f
+    # 必须拆两条 local：同一 local 语句内 ${name} 在赋值生效前展开，
+    # dev 会取到调用者作用域的旧 name（传 $d 时路径错，三个 SN 源全废）
+    local name="$1"
+    local dev="/dev/${name}" sn="" src="" u f
 
     # ① smartctl -i：希捷/西数/NVMe 都给 "Serial Number:"，与标签 SN 一致
     if [ "${SMART_BACKEND:-none}" = "smartctl" ] && [ -n "${SMARTCTL_BIN:-}" ] && [ -b "$dev" ]; then
@@ -3574,14 +3577,17 @@ main() {
     # （老系统/精简环境可能没 flock，不能因此拦住导出）
     if command -v flock &>/dev/null; then
         exec 200>"${OUTPUT_FILE}.lock"
-        # 故意不用 local：cleanup_smart_runtime 由 EXIT trap 触发时 main 已返回，
-        # local 变量届时已销毁，锁文件就删不掉了
-        LOCK_FILE="${OUTPUT_FILE}.lock"
         if ! flock -n 200; then
+            # 失败者绝不能设 LOCK_FILE：否则 EXIT trap 会把持有者的锁文件从
+            # 磁盘提前删掉，后续新实例将创建新 inode 加锁成功，互斥失效
+            exec 200>&-
             record_error "无法获取写锁: ${OUTPUT_FILE} 正被其他实例写入"
             summary_errors
             return 1
         fi
+        # 故意不用 local：cleanup_smart_runtime 由 EXIT trap 触发时 main 已返回，
+        # local 变量届时已销毁，锁文件就删不掉了
+        LOCK_FILE="${OUTPUT_FILE}.lock"
     fi
 
     # 页签名（Excel 上限 31 字符）：必须在锁内读页签号，否则两个并发实例
