@@ -160,15 +160,16 @@ sudo bash /media/usb/collect_hw_info.sh -o "$OUT/hw.xls"
 | 七、GPU | 显示控制器 / NVIDIA 卡与驱动版本 |
 | 七（补充） | **驱动与软件版本**：网卡 / 显示 / 存储 / USB 控制器驱动版本、固件版本、`sshd` 版本 |
 | 八、硬盘分区与挂载 | 紧凑 6 列树形表（分区 / 大小 / 文件系统 / 挂载点 / 用量 / 标签·UUID） |
-| 八（`-d` 时） | 硬盘详细信息与性能测试（hdparm / dd / fio / ioping） |
-| 九（`-d` 时） | 分区与挂载表顺延到「九」 |
+| 八…（`-d` 时） | 每块盘一个「硬盘详细信息与性能测试」章节，从「八」起按 `-d` 顺序顺延（hdparm / dd / fio / ioping） |
+| 顺延（`-d` 时） | 分区与挂载表排在最后一块盘之后；双盘时为「十」 |
 
 ### 数据边界（避免误读）
 
 - **硬盘 SN**：按 `smartctl -i → lsblk -o SERIAL → udevadm → sysfs` 四级回退，不用 WWN 冒充。USB 桥 / RAID 卡不透传时显示「未提供」，以盘体标签为准。
 - **出厂日期**：ATA / NVMe / SMART 标准里**没有**生产日期字段。仅部分希捷盘可通过 FARM 日志读到装配年周（需 smartctl ≥ 7.4），其余凭 SN 查厂商官网或看盘体标签。装配日期 ≠ 购买日期 ≠ 首次使用日期。
 - **虚拟机 / 云块存储**（如 Oracle BlockVolume）不提供物理通电计数器，属预期行为，Excel 会写明原因且**不计警告**。
-- **驱动版本**：内核内置驱动常不声明 `version` 字段，显示「未提供」不是采集失败。
+- **驱动版本**：内核内置驱动常不声明 `version` 字段，显示「未提供」不是采集失败；形如 `name: xxx` 的 `modinfo` 字段行（来源未定案）也会被形态校验拦下，不会当成版本号。
+- **日志口径**：`[WARN]`/`[ERROR]` 行数与「执行结果汇总」计数严格一致；写测试路径提示等说明性信息走 `[INFO]`，不计入警告。
 - **sshd 版本**：老版 OpenSSH（CentOS 6 的 5.3p1、Kylin V10 的 8.2p1）不支持 `sshd -V`，脚本依次回退「服务端二进制版本串 → `ssh -V` → `rpm`/`dpkg-query`」，并在「来源」列写明用了哪一级。
 
 ---
@@ -181,7 +182,7 @@ sudo bash /media/usb/collect_hw_info.sh -o "$OUT/hw.xls"
   -h, --help                    简短用法
   -H, --help-full               完整说明（内置，单文件离线可查）
   -v, --version                 版本号
-  -d, --disk <设备>             附带硬盘性能测试，如 /dev/sda
+  -d, --disk <设备>             附带硬盘性能测试，可多次指定（自动去重），如 -d /dev/sda -d /dev/sdb
   -s, --size <大小>             测试文件大小，默认 10G（K/M/G，大小写均可）
   -p, --test-path <目录>        测试文件写入目录，默认 /tmp
   -o, --output <文件>           指定输出 .xls（优先于位置参数，只能给一次）
@@ -194,7 +195,7 @@ sudo bash /media/usb/collect_hw_info.sh -o "$OUT/hw.xls"
 sudo ./collect_hw_info.sh                          # 当前目录生成
 sudo ./collect_hw_info.sh /mnt/usb                 # 指定输出目录
 sudo ./collect_hw_info.sh -o /tmp/机房A-01.xls     # 指定输出文件名
-sudo ./collect_hw_info.sh -d /dev/sda -s 5G        # 附带硬盘性能测试
+sudo ./collect_hw_info.sh -d /dev/sda -d /dev/sdb -s 5G   # 多盘性能测试（每盘单独成章）
 ./collect_hw_info.sh -H                            # 查看完整文档，无需联网
 ```
 
@@ -221,7 +222,7 @@ sudo ./collect_hw_info.sh -d /dev/sda -s 5G        # 附带硬盘性能测试
 
 每个候选都先跑 `--version` 启动预检，架构不符或 glibc 过旧自动跳过试下一个。实际命中的**来源级别 + 版本 + 路径**会写进日志和 Excel，便于多机批量核对；版本 < 7.4 时会另给一行提示（不支持 FARM 出厂日志）。
 
-日志口径：`[WARN]` / `[ERROR]` 行数与「执行结果汇总」计数严格一致；候选跳过、可选工具缺失等提示用 `[INFO]`，不计入警告。
+日志与退出码：`[WARN]` / `[ERROR]` 行数与「执行结果汇总」计数严格一致；候选跳过、可选工具缺失、写测试路径提示等用 `[INFO]`，不计入警告（详见「数据边界」）。参数错误 `exit 2`、采集/写盘/加锁等硬错误 `exit 1`、性能项未测成 `exit 0`。
 
 ---
 
@@ -240,7 +241,7 @@ SMART 数据要发 `ioctl`（ATA PASS-THROUGH / NVMe Get Log Page），普通用
 它的内核 2.6.32 比其他机器老得多。铺开前先单跑一次 `./smartctl.amd64 --version`，能打印版本号即可；万一失败，只这台改用系统自带 smartctl 或内嵌探针，其余机器不受影响。
 
 **Q：想加其他软件版本（nginx / openssl）怎么办？**
-在 `collect_driver_versions()` 末尾照 `sshd` 那行继续 `add_row` 即可，表格结构不用改。
+在 `collect_driver_versions()` 末尾照 `sshd` 那行继续 `add_rowN`（六列对齐）即可，表格结构不用改。
 
 **Q：为什么输出是 `.xls` 不是 `.xlsx`？**
 Excel XML Spreadsheet 2003 是纯 XML，Bash 直接拼字符串就能生成，不需要任何库，也不需要目标机装 Python 的 Excel 模块。Excel / WPS / LibreOffice 都能直接打开。
@@ -255,4 +256,4 @@ Excel XML Spreadsheet 2003 是纯 XML，Bash 直接拼字符串就能生成，�
 
 ---
 
-当前脚本版本：**v5.21.1**（随时可用 `./collect_hw_info.sh -v` 确认）
+当前脚本版本：**v5.21.5**（随时可用 `./collect_hw_info.sh -v` 确认）

@@ -22,7 +22,7 @@
 # 注释约定：'# ====' 分章节，'# ----' 分小节，'#' 说明设计意图与已知坑。
 # =============================================================================
 
-SCRIPT_VERSION="5.21.1"
+SCRIPT_VERSION="5.21.5"
 SCRIPT_NAME=$(basename "$0")
 
 # ---- 硬盘性能测试配置 ----
@@ -162,10 +162,11 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   五（补充）SMART 通电：通电小时 / 次数 / 健康 / 温度 / 出厂装配日期；
              首部写明「SMART 后端程序」= 来源级别 + smartctl 版本 + 路径，
              版本 < 7.4 时另给「后端能力」行（不支持 FARM 出厂日志）
-  六、网卡（已过滤 sit、ip6tnl、veth 等虚拟接口）
+  六、网卡（已过滤 sit、ip6tnl、veth、CAN 总线等虚拟/非以太网接口）
   七、GPU / 七（补充）驱动与软件版本 / 八、硬盘分区与挂载
-  带 -d 时：八=硬盘详细信息与性能测试，九=分区与挂载（SMART 数值在
-  「五（补充）」已有表格，详细段只给摘要 + 固件/扇区计数等独有项）
+  带 -d 时：每块盘一个「硬盘详细信息与性能测试」章节，从「八」起按 -d
+  顺序顺延（八、九、十…），分区表紧随其后。SMART 数值在「五（补充）」
+  已有表格，详细段只给摘要 + 固件/扇区计数等独有项。
   分区表为紧凑 6 列：分区(树形 NAME) / 大小 / 文件系统 / 挂载点 /
   用量(已用/可用/率) / 标签·UUID，下方汇总压成两行。
   列宽为整表共用，不足 6 列的表格末格自动跨列，长文本不会被挤成多行。
@@ -181,8 +182,9 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   （CentOS 6 的 5.3p1、Kylin V10 的 8.2p1）会报 illegal option，脚本依次
   回退「服务端二进制版本串(grep -a)」→ ssh -V（同包客户端）→ rpm/dpkg 查询；
   「来源」列写明实际用了哪一级。服务端二进制串比客户端版本号更准。
-  要加 nginx / openssl 等软件版本，在 collect_driver_versions() 里照
-  sshd 那行继续 add_row 即可，表格结构不用改。
+  软件行（sshd）与驱动行共用六列：类型=软件、驱动模块/固件写「—」、
+  版本落在「驱动 / 软件版本」列、来源列附服务端路径。要加 nginx /
+  openssl 等，照 sshd 那行继续 add_rowN 即可，表格结构不用改。
 
 四、硬盘 SN 与出厂日期
   SN 按准确度依次尝试：smartctl -i → lsblk -o SERIAL → udevadm → sysfs
@@ -211,7 +213,8 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   静态链接不看目标机 glibc，也不需要 python3；两个架构的静态文件即可通吃
   Kylin 桌面/服务器(aarch64) 与 CentOS 服务器(x86_64)。按 uname -m 依次探测
   smartctl.<架构>、bin/<架构>/smartctl、smartctl/<架构>/smartctl 与同目录裸名
-  ./smartctl（均需 chmod +x，文件名不强制含架构关键字）；读取 SMART 需 root。
+  ./smartctl（均需 chmod +x）。前三种候选的文件名/目录名必须含架构关键字
+  （aarch64 / amd64 等），只有裸名 ./smartctl 可以不带；读取 SMART 需 root。
   纯 Bash/sh 无法发 ioctl，所以"零依赖"只能是脚本+解释器，或脚本+已编译 ELF。
 
 六、环境变量
@@ -230,12 +233,16 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
 八、命令行约定
   -h 只给简短用法，-H 给本说明，-v 只打印版本号。
   参数错误打印一行可操作提示并 exit 2（便于批量脚本判断成败），不会静默成功。
-  日志口径：[WARN]/[ERROR] 行数与汇总计数一致；候选跳过、可选工具缺失等
-  提示用 [INFO]，不计入警告；汇总行本身不带前缀。
+  日志口径：[WARN]/[ERROR] 行数与汇总计数一致；候选跳过、可选工具缺失、
+  写测试路径提示等用 [INFO]，不计入警告；汇总行本身不带前缀。
+  退出码：参数错误 exit 2；采集/写盘/加锁等硬错误 exit 1；性能项缺值
+  （dd/fio/ioping 没拿到数值、测试目录空间不足）只记警告、不判失败，
+  硬件信息照常交付。
   -o 优先于位置参数；输出父目录不存在时自动创建。
   -- 之后的参数一律按输出目录处理；输出目录重复指定会报错。
   -s 接受 数字+K/M/G（大小写均可），如 10G / 512m。
-  -d 时章节「八」为性能测试、「九」为分区与挂载；不带 -d 时分区表即「八」。
+  -d 可多次指定（自动去重保序，开跑前校验块设备），每盘单独成章；
+  章节号从「八」顺延，分区表排在最后一块之后；不带 -d 时分区表即「八」。
 
 九、示例
   ${SCRIPT_NAME}                                # 当前目录生成
@@ -1483,11 +1490,11 @@ add_smart_detail_rows() {
     [ -n "$Q_TEMP" ]   && extra="${extra}${extra:+ / }${Q_TEMP}"
     add_row "通电与健康" "${life:-未获取到} / ${extra:-未获取到}（详见「五（补充）」）"
 
-    local cnt=""
-    [ -n "$Q_REALLOC" ] && cnt="重分配 ${Q_REALLOC}"
-    [ -n "$Q_PENDING" ] && cnt="${cnt}${cnt:+ / }待处理 ${Q_PENDING}"
-    [ -n "$Q_OFFLINE" ] && cnt="${cnt}${cnt:+ / }不可修复 ${Q_OFFLINE}"
-    [ -n "$cnt" ] && add_row "关键扇区计数" "$cnt"
+    # 三项都列出来，缺的写「—」（没读到），不能拼成只有一项的
+    # 「重分配 0」让人误以为其余两项也是 0
+    if [ -n "${Q_REALLOC}${Q_PENDING}${Q_OFFLINE}" ]; then
+        add_row "关键扇区计数" "重分配 ${Q_REALLOC:-—} / 待处理 ${Q_PENDING:-—} / 不可修复 ${Q_OFFLINE:-—}"
+    fi
     [ -n "$Q_NOTE" ] && add_row "采集备注" "$Q_NOTE"
 
     local mfg md
@@ -1557,23 +1564,31 @@ collect_os_info() {
     fi
 
     if [ "$TOOL_DMIDECODE" -eq 1 ]; then
+        # 整段 DMI 字符串统一清洗：国产 BIOS 不只把 BIOS 版本填成
+        # "<BAD INDEX>"，制造商/产品名/主板也可能填 "To be filled by O.E.M."
+        # 或全 0 占位。与内存段共用 mem_clean，避免只修 BIOS 三行留下漏网。
+        # 注意 mem_clean 是「参数式」函数（mem_clean "$v"），不是过滤器：
+        # 写成 `dmidecode | mem_clean` 时 $1 为空，会把 PHYTIUM LTD 这类
+        # 有效值也一并吞成「—」。必须用命令替换把值当参数传进去。
         local sm sp
-        sm=$(dmidecode -s system-manufacturer 2>/dev/null)
-        sp=$(dmidecode -s system-product-name 2>/dev/null)
+        sm=$(mem_clean "$(dmidecode -s system-manufacturer 2>/dev/null | head -1 | trim)")
+        sp=$(mem_clean "$(dmidecode -s system-product-name 2>/dev/null | head -1 | trim)")
         [ -n "$sm" ] && add_row "系统制造商" "$sm"
         [ -n "$sp" ] && add_row "产品名称" "$sp"
 
         local bios_vendor bios_ver bios_date
-        bios_vendor=$(dmidecode -s bios-vendor 2>/dev/null | head -1)
-        bios_ver=$(dmidecode -s bios-version 2>/dev/null | head -1)
-        bios_date=$(dmidecode -s bios-release-date 2>/dev/null | head -1)
+        # 飞腾/国产 BIOS 常回 "<BAD INDEX>" 占位串；显示成「—」而不是
+        # 把 DMI 索引错误当成真实版本写进资产台账
+        bios_vendor=$(mem_clean "$(dmidecode -s bios-vendor 2>/dev/null | head -1 | trim)")
+        bios_ver=$(mem_clean "$(dmidecode -s bios-version 2>/dev/null | head -1 | trim)")
+        bios_date=$(mem_clean "$(dmidecode -s bios-release-date 2>/dev/null | head -1 | trim)")
         [ -n "$bios_vendor" ] && add_row "BIOS 厂商" "$bios_vendor"
         [ -n "$bios_ver" ]    && add_row "BIOS 版本" "$bios_ver"
         [ -n "$bios_date" ]   && add_row "BIOS 日期" "$bios_date"
 
         local board_mfr board_name
-        board_mfr=$(dmidecode -s baseboard-manufacturer 2>/dev/null | head -1)
-        board_name=$(dmidecode -s baseboard-product-name 2>/dev/null | head -1)
+        board_mfr=$(mem_clean "$(dmidecode -s baseboard-manufacturer 2>/dev/null | head -1 | trim)")
+        board_name=$(mem_clean "$(dmidecode -s baseboard-product-name 2>/dev/null | head -1 | trim)")
         [ -n "$board_mfr" ]  && add_row "主板厂商" "$board_mfr"
         [ -n "$board_name" ] && add_row "主板型号" "$board_name"
     fi
@@ -1713,7 +1728,7 @@ collect_cpu_info() {
     else
         local phys_note=""
         [ "$x86" -eq 1 ] && [ "$phys_ids" -gt 0 ] && phys_note="；physical id 去重 ${phys_ids}"
-        add_row "路数判定依据" "${sock_src}${dmi_socks:+；dmidecode 已插插槽 ${dmi_socks}}${phys_note}"
+        add_row "路数判定依据" "${sock_src}${dmi_socks:+；dmidecode 有效插槽 ${dmi_socks}}${phys_note}"
     fi
 
     # 每颗 CPU 明细：单路时型号/核心/线程/频率与上方汇总完全重复，省略；
@@ -1767,6 +1782,9 @@ mem_brand() {
 # 国产 BIOS 常把 SMBIOS 字段填成占位垃圾，直接进报表很难看，统一归一成 —
 mem_clean() {
     local v="$1"
+    # 兼容管道式误用：无参数且 stdin 非终端时从管道取值。
+    # 正常调用一律是 mem_clean "$v"，这里只是防再写错。
+    [ "$#" -eq 0 ] && [ ! -t 0 ] && v=$(cat)
     case "$v" in
         ""|"-"|"Unknown"|"unknown"|"UNKNOWN"|"Not Specified"|"Not Set"|\
         "<BAD INDEX>"|"<BAD INDEX"|"BAD INDEX"|"N/A"|"None"|"none"|\
@@ -2220,7 +2238,8 @@ collect_disk_info() {
     local sn_note="${sn_sources:-未检测到磁盘}" br_note="${brand_sources:-未检测到磁盘}"
     if ! echo "$sn_sources" | grep -q ';'; then sn_note="${sn_note#*=}"; fi
     if ! echo "$brand_sources" | grep -q ';'; then br_note="${br_note#*=}"; fi
-    local disk_notes="SN: ${sn_note}；品牌: ${br_note}（推断值，以盘体标签为准）"
+    # 品牌可能是规则推断，也可能完全没命中；统一措辞不再笼统称「推断值」
+    local disk_notes="SN: ${sn_note}；品牌: ${br_note}（自动识别结果，以盘体标签为准）"
     if [ "$TOOL_LSPCI" -eq 1 ]; then
         local ctrls; ctrls=$(lspci 2>/dev/null | grep -iE 'SATA|AHCI|NVMe|SAS' | head -5 \
             | sed -e 's/^[0-9a-f:.]* //' \
@@ -2361,7 +2380,7 @@ collect_smart_info() {
 is_virtual_iface() {
     case "${1%%@*}" in
         lo|sit*|ip6tnl*|gre*|tunl*|teql*|veth*|docker*|br-*|virbr*|\
-        tap*|tun*|ifb*|dummy*|bonding_masters|nlmon*|hwsim*) return 0 ;;
+        tap*|tun*|ifb*|dummy*|bonding_masters|nlmon*|hwsim*|        can[0-9]*|vcan*|slcan*) return 0 ;;   # SocketCAN 不是以太网口
         *) return 1 ;;
     esac
 }
@@ -2427,7 +2446,15 @@ collect_network_info() {
                         model=$(lspci -s "$pci_addr" 2>/dev/null | sed 's/^[0-9a-f:. ()]* //')
                     fi
                 fi
-                [ -z "$model" ] && model="未知" || model=$(short_pci_desc "$model")
+                model=$(short_pci_desc "$model")
+                # lspci 查不到名称时只给 "Device 8848:1000"，标明是 PCI ID 更易懂
+                case "$model" in
+                    *"Device "*":"*)
+                        local pid; pid=$(echo "$model" \
+                            | grep -oE '[0-9a-fA-F]{4}:[0-9a-fA-F]{4}' | head -1)
+                        [ -n "$pid" ] && model="未识别 PCI 设备 (${pid})" ;;
+                esac
+                [ -z "$model" ] && model="未知"
                 add_table_row "$iface" "$mac" "${model} / ${state:-未知} / ${speed} / ${ip_addr}"
             done <<< "$ifaces"
         fi
@@ -2575,6 +2602,18 @@ module_version() {
     if [ -z "$v" ] && command -v modinfo &>/dev/null; then
         v=$(modinfo -F version "$mod" 2>/dev/null | head -1 | trim)
     fi
+    # 产物里出现过 "name:           xhci_hcd" 这类 modinfo 字段行被写进
+    # 版本列。来源尚未定案（可能是精简 modinfo 忽略 -F、sysfs version
+    # 文件被写成字段行、或某层包装脚本拼了全量输出），但候选来源的共同
+    # 形态都是「含空白或冒号的元数据文本」，一律判为未提供即可兜住，
+    # 不必先定案根因。版本号必须是「无空白、含数字」的单串。
+    if [ -n "$v" ]; then
+        if echo "$v" | grep -qiE '^[[:alpha:]_.-]+[[:space:]]*:' \
+           || ! echo "$v" | grep -qE '^[A-Za-z0-9_.+-]+$' \
+           || ! echo "$v" | grep -q '[0-9]'; then
+            v=""
+        fi
+    fi
     norm_version "$v"
 }
 
@@ -2624,57 +2663,78 @@ sshd_version_info() {
 
 # 按相邻相同驱动合并成一行：10 个同型号网口只占一行，符合紧凑偏好
 merge_nic_records() {
+    # 按「类型+驱动+版本+固件+来源」分组，不要求接口在枚举顺序里相邻。
+    # 飞腾机器上 txgbe 与 ngbe 常交错出现，按相邻合并会把同一驱动拆成多行，
+    # 且 "enp9s0f1 ~ enp13s0f1" 这种区间标签会让人误以为接口名连续。
     printf '%b' "$1" | awk -F'|' '
-        NF < 5 { next }
-        function emit(   label) {
-            if (cnt == 0) return
-            label = (cnt == 1) ? first : first " ~ " last " (" cnt " 口)"
-            printf "%s|网卡|%s|%s|%s|%s\n", label, kdrv, kver, kfw, ksrc
-        }
+        NF < 6 { next }
         {
-            key = $2 "|" $3 "|" $4 "|" $5
-            if (key == cur) { last = $1; cnt++ }
-            else { emit(); cur = key; first = $1; last = $1; cnt = 1
-                   kdrv = $2; kver = $3; kfw = $4; ksrc = $5 }
+            key = $2 "|" $3 "|" $4 "|" $5 "|" $6
+            if (!(key in seen)) { order[++n] = key; seen[key] = 1
+                                  first[key] = $1; kind[key] = $2
+                                  drv[key] = $3; ver[key] = $4
+                                  fw[key] = $5; src[key] = $6 }
+            cnt[key]++
         }
-        END { emit() }
+        END {
+            for (i = 1; i <= n; i++) {
+                k = order[i]
+                label = (cnt[k] == 1) ? first[k] \
+                        : first[k] " 等 " cnt[k] " 口"
+                printf "%s|%s|%s|%s|%s|%s\n", label, kind[k], drv[k], \
+                       ver[k], fw[k], src[k]
+            }
+        }
     '
 }
 
 merge_pci_records() {
+    # 与 merge_nic_records 同款：按「类型+驱动+版本」全量分组，不要求相邻。
+    # Intel 常见布局 xhci(00:14) / AHCI(00:17) / xhci(00:1a) 会让同一 xhci
+    # 驱动被 AHCI 隔开；相邻合并会把它拆成两行「×1 设备」。
     printf '%b' "$1" | awk -F'|' '
         NF < 4 { next }
-        function emit(   label) {
-            if (cnt == 0) return
-            label = (cnt == 1) ? first : kkind " ×" cnt " 设备"
-            printf "%s|%s|%s|%s|—|sysfs PCI class + modinfo\n", label, kkind, kdrv, kver
-        }
         {
             key = $1 "|" $2 "|" $3
-            if (key == cur) { cnt++ }
-            else { emit(); cur = key; first = $4; cnt = 1
-                   kkind = $1; kdrv = $2; kver = $3 }
+            if (!(key in seen)) { order[++n] = key; seen[key] = 1
+                                  first[key] = $4; kind[key] = $1
+                                  drv[key] = $2; ver[key] = $3 }
+            cnt[key]++
         }
-        END { emit() }
+        END {
+            for (i = 1; i <= n; i++) {
+                k = order[i]
+                label = (cnt[k] == 1) ? first[k] \
+                        : kind[k] " ×" cnt[k] " 设备"
+                printf "%s|%s|%s|%s|—|sysfs PCI class + modinfo\n", \
+                       label, kind[k], drv[k], ver[k]
+            }
+        }
     '
 }
 
 collect_driver_versions() {
     log_info "正在收集驱动与软件版本..."
     add_section "七（补充）、驱动与软件版本"
-    add_hdrN "设备 / 接口" "类型" "驱动模块" "驱动版本" "固件版本" "来源"
+    add_hdrN "设备 / 接口" "类型" "驱动模块" "驱动 / 软件版本" "固件版本" "来源"
 
     # ---- 网卡 ----
-    local ifaces="" rec="" iface drv ver fw ei mod src="" bus
+    local ifaces="" rec="" iface drv ver fw ei mod src="" bus kind=""
     if [ "$TOOL_IP" -eq 1 ]; then
+        # 与「六、网卡信息」保持一致：ip link 里的 eth0@if5 之类别名要去掉
+        # @后缀，否则 ethtool -i "$iface" 拿不到驱动，两节接口集合也会对不上
         ifaces=$(ip link show 2>/dev/null | grep -E '^[0-9]+:' | grep -v 'lo:' \
-                 | awk -F': ' '{print $2}' | awk '{print $1}')
+                 | awk -F': ' '{print $2}' | cut -d'@' -f1 | awk '{print $1}')
     else
         ifaces=$(ls /sys/class/net/ 2>/dev/null | grep -v '^lo$')
     fi
     while IFS= read -r iface; do
         [ -z "$iface" ] && continue
-        is_virtual_iface "$iface" && continue
+        # CAN 总线不是以太网：网卡表已过滤，但驱动信息有价值，保留并单列类型
+        case "$iface" in
+            can[0-9]*|vcan*|slcan*) kind="CAN 总线" ;;
+            *) is_virtual_iface "$iface" && continue; kind="网卡" ;;
+        esac
         drv=""; ver=""; fw=""; src=""
         if command -v ethtool &>/dev/null; then
             ei=$(ethtool -i "$iface" 2>/dev/null)
@@ -2701,7 +2761,7 @@ collect_driver_versions() {
         fi
         fw=$(norm_version "$fw"); [ "$fw" = "未提供" ] && fw="—"
         [ -z "$src" ] && src="未提供"
-        rec="${rec}${iface}|${drv}|${ver}|${fw}|${src}\n"
+        rec="${rec}${iface}|${kind}|${drv}|${ver}|${fw}|${src}\n"
     done <<< "$ifaces"
 
     local line rows=0
@@ -2737,13 +2797,18 @@ collect_driver_versions() {
 
     [ "$rows" -eq 0 ] && add_rowN "未检测到驱动信息" "—" "—" "—" "—" "—"
 
-    # ---- 软件版本（先只放 sshd；要加别的在此继续 add_row） ----
+    # ---- 软件版本（先只放 sshd） ----
+    # 软件行必须和驱动行一样用 add_rowN 六列对齐。旧实现用两列 add_row 把
+    # 「版本 | 路径 | 来源」整串塞进一个跨 2~6 列的单元格，在六列表格里
+    # 看起来像全挤在「类型」列，且后续软件无法复用列位。
+    # 要加 nginx / openssl 等，照下面这行继续 add_rowN 即可，表格结构不用改。
     local sshd_info sver spath ssrc
     sshd_info=$(sshd_version_info)
     IFS='|' read -r sver spath ssrc <<< "$sshd_info"
-    local sloc=""
-    [ -n "$spath" ] && sloc=" | ${spath}"
-    add_row "sshd (SSH 服务端)" "${sver}${sloc} | 来源: ${ssrc}"
+    local sloc="${spath:-未提供}"
+    add_rowN "sshd (SSH 服务端)" "软件" "—" "${sver:-未提供}" "—" \
+             "${ssrc:-未提供}（${sloc}）"
+    rows=$((rows + 1))
 }
 
 # =============================================================================
@@ -2802,10 +2867,13 @@ parse_fio_lat() {
 
 # 测试结果落表：空值或「未知」说明测试/解析失败，必须上抛计数，
 # 不能静默写成空白单元格让人误以为测过且正常
+# 性能项缺值只记警告：文件已正常交付、缺值文案也进了表，批量巡检不该
+# 整台判死。硬错误（采集失败、写盘/建备份/加锁失败）仍走 record_error，
+# main 末尾据此 exit 1 的语义不被稀释。
 row_or_fail() {  # $1=表行标签  $2=测试结果  $3=失败上下文
     if [ -z "$2" ] || [ "$2" = "未知" ]; then
-        record_error "性能测试失败: ${3}"
-        add_row "$1" "测试失败"
+        record_warn "性能项未测成: ${3}"
+        add_row "$1" "未测成（详见日志）"
     else
         add_row "$1" "$2"
     fi
@@ -3078,15 +3146,25 @@ collect_partition_info() {
 
 # -d 详细段：sysfs 块设备参数 + SMART 摘要 + hdparm/dd/fio/ioping 性能测试。
 # SMART 完整表格在「五（补充）」，这里只给摘要与固件/扇区计数等独有项
+# 中文章节序号：不带 -d 时分区表是「八」；带 N 块盘时性能测试从「八」
+# 起顺延 N 个，分区表紧随其后。表外用阿拉伯数字兜底，避免超出数组越界。
+cn_section_no() {
+    local idx="${1:-0}"
+    local -a cn=(八 九 十 十一 十二 十三 十四 十五 十六 十七 十八 十九 二十)
+    [ "$idx" -lt 0 ] && idx=0
+    if [ "$idx" -lt "${#cn[@]}" ]; then echo "${cn[$idx]}"
+    else echo "$((8 + idx))"; fi
+}
+
 collect_disk_perf_info() {
-    local disk="$1"
+    local disk="$1" sec_no="${2:-八}"
     local dn; dn=$(basename "$disk")
     log_info "正在收集硬盘详细信息并进行性能测试: ${disk}"
 
     # 检查磁盘设备
     if [ ! -b "$disk" ]; then
         record_error "磁盘设备不存在或不是块设备: ${disk}"
-        add_section "八、硬盘详细信息与性能测试"
+        add_section "${sec_no}、硬盘详细信息与性能测试"
         add_row "状态" "磁盘设备检查失败: ${disk}"
         return 1
     fi
@@ -3094,12 +3172,12 @@ collect_disk_perf_info() {
     # 检查测试目录
     if [ ! -d "$TEST_FILE_DIR" ] || [ ! -w "$TEST_FILE_DIR" ]; then
         record_error "测试目录不存在或不可写: ${TEST_FILE_DIR}"
-        add_section "八、硬盘详细信息与性能测试"
+        add_section "${sec_no}、硬盘详细信息与性能测试"
         add_row "状态" "测试目录检查失败: ${TEST_FILE_DIR}"
         return 1
     fi
 
-    add_section "八、硬盘详细信息与性能测试 - ${disk}"
+    add_section "${sec_no}、硬盘详细信息与性能测试 - ${disk}"
     add_row "测试开始时间" "$(date '+%Y-%m-%d %H:%M:%S')"
     add_blank
 
@@ -3107,7 +3185,7 @@ collect_disk_perf_info() {
     local dd_count=$test_size_mb
     local missing_tools=""
     local used_tools="sysfs + blockdev"
-    local err0=$ERROR_COUNT
+    local err0=$ERROR_COUNT warn0=$WARN_COUNT
     local write_ok=1
 
     # 空间校验：写测试要在 TEST_FILE_DIR 预留约 test_size_mb 的空间，
@@ -3116,19 +3194,19 @@ collect_disk_perf_info() {
     avail_kb=$(df -Pk "$TEST_FILE_DIR" 2>/dev/null | awk 'NR==2{print $4}')
     if [ -n "$avail_kb" ] && [ "$avail_kb" -lt $((test_size_mb * 1024)) ] 2>/dev/null; then
         write_ok=0
-        record_error "测试目录剩余空间不足: ${TEST_FILE_DIR} 可用 $((avail_kb / 1024))M < ${DISK_TEST_SIZE}，跳过全部写测试"
+        record_warn "测试目录剩余空间不足: ${TEST_FILE_DIR} 可用 $((avail_kb / 1024))M < ${DISK_TEST_SIZE}，跳过全部写测试"
     fi
 
     # 落盘校验：-p 目录可能落在 tmpfs/根盘上，与 -d 被测盘不是同一块，
     # 测出的「写速度」是内存或另一块盘的速度，必须在结果里标出来
     if [ "$write_ok" -eq 1 ]; then
-        local wsrc wname
+        local wsrc wname path_note=""
         wsrc=$(df -P "$TEST_FILE_DIR" 2>/dev/null | awk 'NR==2{print $1}')
         wname=$(basename "$wsrc" 2>/dev/null)
         case "$wsrc" in
             /dev/*)
                 if [ ! -b "$wsrc" ]; then
-                    log_warn "测试目录落盘设备不存在（${wsrc}），写入速度仅供参考"
+                    path_note="落盘设备 ${wsrc} 不存在，写入速度仅供参考"
                 else
                     # PKNAME 逐级回溯到整盘根（sda1→sda），与 -d 的设备名比对；
                     # 老 util-linux 无 PKNAME 列时 lsblk 失败，回溯不到就跳过比对
@@ -3140,15 +3218,21 @@ collect_disk_perf_info() {
                         cur="$parent"
                     done
                     if { [ -n "$parent" ] || [ -e "/sys/block/$cur" ]; } && [ "$cur" != "$dn" ]; then
-                        log_warn "测试目录落盘于 ${wname}，与被测盘 ${dn} 不同，写入速度不代表 ${dn}"
-                        add_row "写入测试路径提示" "目录落盘 ${wname} ≠ 被测 ${dn}，写速度不可比"
+                        path_note="目录落盘 ${wname} ≠ 被测 ${dn}，写速度不可比"
                     fi
                 fi
                 ;;
             *)
-                [ -n "$wsrc" ] && log_warn "测试目录不在块设备上（${wsrc}），写入速度可能是内存/网络盘，不代表 ${dn}"
+                [ -n "$wsrc" ] && path_note="测试目录不在块设备上（${wsrc}），写入速度可能是内存/网络盘，不代表 ${dn}"
                 ;;
         esac
+        # 三种落盘提示统一用 [INFO] 并各写一行 Excel：这是「写速度可比性
+        # 说明」，不是采集失败。原先三处 log_warn 不计数、record_warn 才
+        # 计数，会让 -d 场景出现 [WARN] 行数 > 汇总计数，破坏口径不变式。
+        if [ -n "$path_note" ]; then
+            log_info "写入测试路径提示: ${path_note}"
+            add_row "写入测试路径提示" "$path_note"
+        fi
     fi
 
     # ==========================================================================
@@ -3417,7 +3501,9 @@ collect_disk_perf_info() {
     fi
 
     if [ "$ERROR_COUNT" -gt "$err0" ]; then
-        add_footer "测试结束（有失败项，见上方各节「测试失败/跳过」行及日志错误） | 测试数据大小: ${DISK_TEST_SIZE} | 工具: ${used_tools}"
+        add_footer "测试结束（有硬错误，见日志） | 测试数据大小: ${DISK_TEST_SIZE} | 工具: ${used_tools}"
+    elif [ "$WARN_COUNT" -gt "$warn0" ]; then
+        add_footer "测试完成（部分项目未测成，见上方「未测成/跳过」行） | 测试数据大小: ${DISK_TEST_SIZE} | 工具: ${used_tools}"
     else
         add_footer "测试完成 | 测试数据大小: ${DISK_TEST_SIZE} | 工具: ${used_tools}"
     fi
@@ -3559,29 +3645,43 @@ main() {
     collect_gpu_info;     add_blank
     collect_driver_versions; add_blank
 
-    local _perf_disk
+    # 多盘时每块盘单独成章，章节号从「八」顺延；分区表排在最后一块之后
+    local _perf_disk _perf_idx=0 _perf_no part_no
     for _perf_disk in "${DISK_DEVICES[@]}"; do
-        collect_disk_perf_info "$_perf_disk"
+        _perf_no=$(cn_section_no "$_perf_idx")
+        collect_disk_perf_info "$_perf_disk" "$_perf_no"
+        _perf_idx=$((_perf_idx + 1))
         add_blank
     done
     # 分区表是用户要的"最后底下那一份"：放在可选性能测试段之后、页脚之前
-    local part_no="八"
-    [ "${#DISK_DEVICES[@]}" -gt 0 ] && part_no="九"
+    part_no=$(cn_section_no "$_perf_idx")
     collect_partition_info "$part_no"
     add_blank
 
     add_footer "导出时间: $(date '+%Y-%m-%d %H:%M:%S')  |  导出工具: ${SCRIPT_NAME} v${SCRIPT_VERSION}"
 
     local sheet_data="$DATA_ROWS"
+
+    # 可写性必须在加锁之前验证：输出目录不可写时 `exec 200>...lock` 也会
+    # 失败，若放在锁之后会被误报成「正被其他实例写入」，把排错方向带偏
+    if ! check_file_writable "$OUTPUT_FILE"; then
+        summary_errors
+        return 1
+    fi
+
     # 并发写同一 .xls 会互相踩，flock 可用时上互斥锁；缺失则降级为无锁
     # （老系统/精简环境可能没 flock，不能因此拦住导出）
     if command -v flock &>/dev/null; then
-        exec 200>"${OUTPUT_FILE}.lock"
+        if ! { exec 200>"${OUTPUT_FILE}.lock"; } 2>/dev/null; then
+            record_error "无法创建写锁文件（检查输出目录写权限）: ${OUTPUT_FILE}.lock"
+            summary_errors
+            return 1
+        fi
         if ! flock -n 200; then
             # 失败者绝不能设 LOCK_FILE：否则 EXIT trap 会把持有者的锁文件从
             # 磁盘提前删掉，后续新实例将创建新 inode 加锁成功，互斥失效
             exec 200>&-
-            record_error "无法获取写锁: ${OUTPUT_FILE} 正被其他实例写入"
+            record_error "无法获取写锁: ${OUTPUT_FILE} 可能正被其他实例写入，或锁文件不可访问"
             summary_errors
             return 1
         fi
@@ -3606,11 +3706,6 @@ main() {
     log_info "正在生成 Excel 文件..."
 
     local ws_xml; ws_xml=$(make_worksheet_xml "$sheet_name" "$sheet_data")
-
-    if ! check_file_writable "$OUTPUT_FILE"; then
-        summary_errors
-        return 1
-    fi
 
     local out_dir; out_dir=$(dirname "$OUTPUT_FILE")
 
