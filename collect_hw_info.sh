@@ -7,8 +7,11 @@
 # 环境  : Kylin / CentOS / Ubuntu / Debian / Fedora 等主流 Linux。
 #         无需联网、无需安装软件包；缺失命令自动跳过，不中断导出。
 # 交付  : 单个 .xls，6 列紧凑表格（列宽整表共用），彩色样式 + 合并单元格。
-#         章节：基本信息 / 系统版本 / CPU(多路) / 内存 / 硬盘(品牌·SN) /
-#         SMART 通电·出厂 / 网卡 / GPU / [可选性能测试] / 分区与挂载。
+#         七节（标题按各节实际采集内容命名）：
+#         一、基本信息与系统版本 / 二、CPU 信息 / 三、内存信息 /
+#         四、硬盘与 SMART 通电信息 / 五、网卡信息 /
+#         六、GPU、驱动与软件版本 / 七、硬盘分区与挂载信息；
+#         -d 时性能测试从「七」顺延。
 # SMART : 通电时长、通电次数、健康、温度、SN、出厂装配日期。四级后端回退
 #         （详见 --help-full 第五节）：
 #           ① 环境变量 SMARTCTL_BIN / 同目录静态 smartctl.<架构>
@@ -22,7 +25,7 @@
 # 注释约定：'# ====' 分章节，'# ----' 分小节，'#' 说明设计意图与已知坑。
 # =============================================================================
 
-SCRIPT_VERSION="5.21.5"
+SCRIPT_VERSION="5.22.1"
 SCRIPT_NAME=$(basename "$0")
 
 # ---- 硬盘性能测试配置 ----
@@ -155,18 +158,32 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   序号前缀必须保留：Excel 不允许同名页签。
   -o 可直接指定输出文件名与路径，父目录不存在会自动创建。
 
-二、报表章节
-  一、基本信息        / 二、系统版本信息 / 三、CPU（含多路判定与双路插槽明细）
-  四、内存（品牌、模组型号、SN、速率、Rank）
-  五、硬盘信息（品牌·系列 / 型号 / SN 独立列，末尾「采集说明」写明 SN 与品牌来源）
-  五（补充）SMART 通电：通电小时 / 次数 / 健康 / 温度 / 出厂装配日期；
-             首部写明「SMART 后端程序」= 来源级别 + smartctl 版本 + 路径，
-             版本 < 7.4 时另给「后端能力」行（不支持 FARM 出厂日志）
-  六、网卡（已过滤 sit、ip6tnl、veth、CAN 总线等虚拟/非以太网接口）
-  七、GPU / 七（补充）驱动与软件版本 / 八、硬盘分区与挂载
-  带 -d 时：每块盘一个「硬盘详细信息与性能测试」章节，从「八」起按 -d
-  顺序顺延（八、九、十…），分区表紧随其后。SMART 数值在「五（补充）」
-  已有表格，详细段只给摘要 + 固件/扇区计数等独有项。
+二、报表章节（v5.22 起七节，一个模块一个序号，无补充章节；合并节标题按实际内容命名）
+  一、基本信息与系统版本
+      主机名 / 采集时间 / 设备序列号 + 操作系统 / 架构 / 内核 / BIOS /
+      主板 / 制造商（原「二、系统版本」并入，两组行之间保留空行分隔）
+  二、CPU 信息
+      路数（单/双/多路）、每路核心、物理核心总数、SMT、NUMA、每颗插槽明细
+  三、内存信息
+      厂商（DMI 原文，不推断）、总容量、内存条数量、
+      「内存条序列号 (SN)」按插槽汇总行、类型、插槽容量合计、
+      模组型号 / SN / Rank 明细（同规格合并标数量）
+  四、硬盘与 SMART 通电信息
+      厂商 / 系列（设备原文，不推断）/ 型号 / 类型·接口 / SN 独立列；
+      末尾「采集说明」写明 SN 与厂商来源；同节续 SMART 通电时长 / 次数 /
+      健康 / 温度 / 出厂装配日期，首部写明「SMART 后端程序」= 来源级别 +
+      smartctl 版本 + 路径，版本 < 7.4 时另给「后端能力」行
+  五、网卡信息
+      MAC / 型号 / 状态 / 速率 / IP（已过滤 sit、ip6tnl、veth、CAN 总线等
+      虚拟或非以太网接口）
+  六、GPU、驱动与软件版本
+      显示控制器 / NVIDIA 卡与驱动版本 + 网卡 / 显示 / 存储 / USB 控制器
+      驱动版本、固件版本、sshd 版本
+  七、硬盘分区与挂载信息
+      紧凑 6 列树形表 + 两行汇总
+  带 -d 时：每块盘一个「硬盘详细信息与性能测试」章节，从「七」起按 -d
+  顺序顺延（七、八、九…），分区表紧随其后。SMART 数值在
+  「四、硬盘与 SMART 通电信息」已有表格，详细段只给摘要 + 固件/扇区计数等独有项。
   分区表为紧凑 6 列：分区(树形 NAME) / 大小 / 文件系统 / 挂载点 /
   用量(已用/可用/率) / 标签·UUID，下方汇总压成两行。
   列宽为整表共用，不足 6 列的表格末格自动跨列，长文本不会被挤成多行。
@@ -187,9 +204,15 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   openssl 等，照 sshd 那行继续 add_rowN 即可，表格结构不用改。
 
 四、硬盘 SN 与出厂日期
-  SN 按准确度依次尝试：smartctl -i → lsblk -o SERIAL → udevadm → sysfs
-  (device/serial、VPD 0x80)。读不到显示「未提供」，以盘体标签为准；
-  不用 WWN 冒充 SN。来源写在「五、硬盘信息」的「采集说明」一行。
+  SN 六级回退：① smartctl -i（与 SMART 后端解耦：旧版后端走内嵌探针时
+  即使有 smartctl 也不读标识，这是 SATA/NVMe 固态盘漏 SN 的主因；NVMe 另
+  试控制器节点 /dev/nvmeN）→ ② lsblk -o SERIAL（-d 组合失败时去掉 -d 重试）
+  → ③ udevadm → ④ sysfs（device/serial；NVMe 只取本盘推导出的
+  /sys/class/nvme/nvmeN/serial，不遍历其他控制器，避免多盘串号）→
+  ⑤ SCSI VPD 0x80 → ⑥ nvme id-ctrl。
+  注意 ④⑥ 只对 NVMe 生效；SATA SSD 主要靠 ①②③⑤。若 SATA 盘经 USB/SATA
+  桥接，smartctl 可能需 -d sat，此时按「采集说明」给的提示手工核对即可。
+  读不到显示「未提供」，以盘体标签为准；不用 WWN 冒充 SN。
   ATA / NVMe / SMART 标准【没有】生产日期字段：脚本尝试 ① Seagate FARM
   日志的 Assembly Date（需 smartctl 7.4+，且仅部分希捷盘支持，USB 桥可能
   不透传）；② 少数 SCSI/SAS 盘 smartctl -i 的 Manufactured 行。都拿不到
@@ -242,7 +265,7 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   -- 之后的参数一律按输出目录处理；输出目录重复指定会报错。
   -s 接受 数字+K/M/G（大小写均可），如 10G / 512m。
   -d 可多次指定（自动去重保序，开跑前校验块设备），每盘单独成章；
-  章节号从「八」顺延，分区表排在最后一块之后；不带 -d 时分区表即「八」。
+  章节号从「七」顺延，分区表排在最后一块之后；不带 -d 时分区表即「七」。
 
 九、示例
   ${SCRIPT_NAME}                                # 当前目录生成
@@ -1469,7 +1492,7 @@ smart_parse_line() {
 }
 
 # 把 SMART 结果写成一组明细行（-d 详细测试段复用）。
-# 通电/健康/温度/出厂日期在「五（补充）」已有完整表格，这里压成摘要并指向该节，
+# 通电/健康/温度/出厂日期在「四、硬盘与 SMART 通电信息」已有完整表格，这里压成摘要并指向该节，
 # 避免 -d 段把同一组数字重复 8 行；只保留详细段独有的固件版本、关键扇区计数。
 add_smart_detail_rows() {
     local disk="$1" line si sn fw
@@ -1488,7 +1511,7 @@ add_smart_detail_rows() {
     [ -n "$Q_CYCLES" ] && life="${life}${life:+ / }${Q_CYCLES} 次"
     [ -n "$Q_HEALTH" ] && extra="$Q_HEALTH"
     [ -n "$Q_TEMP" ]   && extra="${extra}${extra:+ / }${Q_TEMP}"
-    add_row "通电与健康" "${life:-未获取到} / ${extra:-未获取到}（详见「五（补充）」）"
+    add_row "通电与健康" "${life:-未获取到} / ${extra:-未获取到}（详见「四、硬盘与 SMART 通电信息」）"
 
     # 三项都列出来，缺的写「—」（没读到），不能拼成只有一项的
     # 「重分配 0」让人误以为其余两项也是 0
@@ -1500,7 +1523,7 @@ add_smart_detail_rows() {
     local mfg md
     mfg=$(smart_get_disk_mfg "$disk" "$SMART_BACKEND")
     md=$(echo "$mfg" | sed -n '1p')
-    add_row "出厂 / 装配日期" "${md:-未提供}（详见「五（补充）」）"
+    add_row "出厂 / 装配日期" "${md:-未提供}（详见「四、硬盘与 SMART 通电信息」）"
 
     smart_detect_env
     if [ "$SMART_ENV_IS_VM" -eq 1 ]; then
@@ -1540,7 +1563,7 @@ collect_os_info() {
     local now; now=$(date '+%Y-%m-%d %H:%M:%S')
     [ -z "$DEVICE_SN" ] && resolve_device_sn
 
-    add_section "一、基本信息"
+    add_section "一、基本信息与系统版本"
     add_row "主机名" "$os_hostname"
     add_row "采集时间" "$now"
     case "$DEVICE_SN_SRC" in
@@ -1550,7 +1573,9 @@ collect_os_info() {
     esac
     add_blank
 
-    add_section "二、系统版本信息"
+    # 原「二、系统版本信息」并入第一节，标题随之改为「一、基本信息与系统版本」，
+    # 让名字覆盖实际内容。保留这里的空行分隔
+    # 语义（基本身份三行 / 系统版本行组），两组的行一行不删，只是不再另起章节号。
     add_row "操作系统" "$os_name"
     add_row "系统架构" "$os_arch"
     add_row "内核版本" "$os_kernel"
@@ -1639,7 +1664,7 @@ parse_dmi_cpu_sockets() {
 # ARM 上 physical id 常恒为 0，不拿它做差异报警；末尾附每颗插槽明细
 collect_cpu_info() {
     log_info "正在收集 CPU 信息..."
-    add_section "三、CPU 信息"
+    add_section "二、CPU 信息"
 
     local out=""; [ "$TOOL_LSCPU" -eq 1 ] && out=$(LC_ALL=C lscpu 2>/dev/null)
     local model arch mhz numa sockets cores_per threads_per cpus
@@ -1698,7 +1723,7 @@ collect_cpu_info() {
     esac
 
     add_row "型号" "$model"
-    # 「架构」已在「二、系统版本信息」给出，这里不再重复
+    # 「架构」已在「一、基本信息与系统版本」给出，这里不再重复
     add_row "CPU 路数（物理颗数）" "$sock_desc"
     [ -n "$cores_per" ]  && add_row "每路物理核心数" "$cores_per"
     if [[ "$sockets" =~ ^[0-9]+$ ]] && [[ "$cores_per" =~ ^[0-9]+$ ]]; then
@@ -1744,39 +1769,20 @@ collect_cpu_info() {
     fi
 }
 
-# 内存品牌：优先 DMI Manufacturer；BIOS 填 Unknown 时按模组型号前缀轻推断，
-# 明确标注「推断」，不把猜测当官方数据。JEDEC 厂商码也做几个常见映射。
-mem_brand() {
-    local manu="$1" part="$2" b=""
-    case "$manu" in
-        ""|"-"|"—"|"Unknown"|"unknown"|"UNKNOWN"|"Not Specified"|\
-        "0x0000"|"0x00000000"|"To be filled by O.E.M."|"Default string") manu="" ;;
+# 内存厂商：只读 dmidecode -t memory 的 Manufacturer 原文，不做任何推断。
+#
+# 旧版内存品牌推断函数有一张「模组型号前缀 → 中文品牌」规则表（KVR→金士顿、
+# M39→三星、JEDEC 厂商码映射…），与硬盘品牌规则表是同一类猜测。按
+# 「只显示真实读出的信息、不编造」原则，v5.22.0 起整表删除：
+#   DMI 报什么就写什么（含 0x802C 这类厂商码，保持原样不翻译）；
+#   没填 / 占位值（mem_clean 已归一为「—」）就写「未提供（BIOS 未填）」。
+# 型号前缀、JEDEC 码、中文品牌名一律不猜；以内存条物理标签为准。
+mem_manu_raw() {
+    local m="$1"
+    case "$m" in
+        ""|"—"|"-") echo "未提供（BIOS 未填）" ;;
+        *)           echo "$m" ;;
     esac
-    [ "$part" = "—" ] && part=""
-    if [ -n "$manu" ]; then
-        case "$manu" in
-            0x802C|0x2C|0x2c00)  manu="Micron 镁光（DMI 厂商码）" ;;
-            0x80CE|0xCE|0xce00)  manu="Samsung 三星（DMI 厂商码）" ;;
-            0x80AD|0xAD|0xad00)  manu="SK hynix 海力士（DMI 厂商码）" ;;
-            0x8098|0x98)         manu="Kioxia / Toshiba（DMI 厂商码）" ;;
-        esac
-        echo "$manu"
-        return
-    fi
-    case "$part" in
-        KVR*|KHX*|HX[34]*|KF[34]*) b="Kingston 金士顿" ;;
-        M39*|M47*|M32*|M37*)       b="Samsung 三星" ;;
-        HMA*|HMT*|HMC*)            b="SK hynix 海力士" ;;
-        MTA*|MTF*)                 b="Micron 镁光" ;;
-        CT*)                        b="Crucial 英睿达" ;;
-        CM[KTWZ]*|CMS*)            b="Corsair 海盗船" ;;
-        F4-*|F3-*)                 b="G.Skill 芝奇" ;;
-    esac
-    if [ -n "$b" ]; then
-        echo "${b}（按模组型号前缀推断）"
-    else
-        echo "未提供"
-    fi
 }
 
 # 国产 BIOS 常把 SMBIOS 字段填成占位垃圾，直接进报表很难看，统一归一成 —
@@ -1797,11 +1803,11 @@ mem_clean() {
     esac
 }
 
-# 内存：dmidecode -t memory；品牌优先 DMI Manufacturer，缺失时按模组型号前缀
-# 推断并明确标注；同规格多条合并成一行标数量，坏值(<BAD INDEX>/00000000)归一为 —
+# 内存：dmidecode -t memory；厂商只读 DMI Manufacturer 原文、不按型号前缀推断；
+# 同规格多条合并成一行标数量，坏值(<BAD INDEX>/00000000)归一为 —
 collect_memory_info() {
     log_info "正在收集内存信息..."
-    add_section "四、内存信息"
+    add_section "三、内存信息"
 
     if [ "$TOOL_FREE" -eq 1 ]; then
         # LC_ALL=C 已挡住标签被 gettext 翻译（Mem:→内存：）；
@@ -1837,7 +1843,7 @@ collect_memory_info() {
                         ctype=$(mem_clean "$type"); cspeed=$(mem_clean "$speed")
                         cconf=$(mem_clean "$conf")
                         dloc+=("${loc:-插槽${idx}}")
-                        dbrand+=("$(mem_brand "$cmanu" "$cpart")")
+                        dbrand+=("$(mem_manu_raw "$cmanu")")
                         # Speed=Unknown 而 Configured Memory Speed 有效时直接用后者，
                         # 别显示成 "Unknown / 配置 2133 MT/s"
                         local sp="$cspeed"
@@ -1876,6 +1882,21 @@ collect_memory_info() {
     dimm_count=${#dloc[@]}
     add_row "内存条数量" "$dimm_count"
     if [ "$dimm_count" -gt 0 ]; then
+        # 内存 SN 独立汇总行：明细表第 6 列是「模组型号 / SN / Rank」三合一，
+        # 同规格合并行又用逗号拼接，资产盘点不方便直接复制。这里按插槽逐条
+        # 列出有效 SN，不改变 6 列紧凑表格结构；BIOS 全填 00000000 时给明确
+        # 说明，避免被误读成「脚本没采」。
+        local mem_sn_list="" mem_sn_ok=0 mi
+        for mi in "${!dloc[@]}"; do
+            [ "${dsn[$mi]}" = "—" ] && continue
+            mem_sn_ok=$((mem_sn_ok + 1))
+            mem_sn_list="${mem_sn_list}${mem_sn_list:+; }${dloc[$mi]}=${dsn[$mi]}"
+        done
+        if [ "$mem_sn_ok" -gt 0 ]; then
+            add_row "内存条序列号 (SN)" "${mem_sn_list}（${mem_sn_ok}/${dimm_count} 条有效，dmidecode -t memory）"
+        else
+            add_row "内存条序列号 (SN)" "—（BIOS/SMBIOS 未提供模组 SN，以内存条标签为准）"
+        fi
         local brands; brands=$(printf '%s\n' "${dbrand[@]}" | sort -u | grep -v '^$' \
                               | tr '\n' ',' | sed 's/,$//; s/,/, /g' | trim)
         local types;  types=$(printf '%s\n' "${dtype[@]}" | sort -u | grep -v '^$' \
@@ -1895,9 +1916,9 @@ collect_memory_info() {
                 *)  total_mb=$((total_mb + num)) ;;  # MB 或无单位按 MB
             esac
         done
-        add_row "内存品牌" "${brands:-未知}"
+        add_row "内存厂商（DMI 原文）" "${brands:-未提供（BIOS 未填）}"
         printf '%s\n' "${dbrand[@]}" | grep -q '未提供' \
-            && add_row "品牌说明" "BIOS 未填 Manufacturer、模组型号也不可读；以内存条标签为准"
+            && add_row "厂商说明" "BIOS/SMBIOS 未填 Manufacturer，按原文直出为「未提供」；不按型号推断，以内存条标签为准"
         add_row "内存类型" "${types:-未知}"
         [ "$total_mb" -gt 0 ] && add_row "插槽容量合计" "$((total_mb / 1024)) GiB（按 DMI 累加 ${total_mb} MB）"
 
@@ -1927,7 +1948,7 @@ collect_memory_info() {
                 okey+=("${dkey[$i]}");   ocnt+=(1)
             fi
         done
-        add_hdrN "插槽" "数量" "品牌 / 制造商" "容量" "类型 / 速率" "模组型号 / SN / Rank"
+        add_hdrN "插槽" "数量" "厂商（DMI 原文）" "容量" "类型 / 速率" "模组型号 / SN / Rank"
         for j in "${!oloc[@]}"; do
             local label="${oloc[$j]}" dup=0
             for i in "${!oloc[@]}"; do
@@ -1944,86 +1965,63 @@ collect_memory_info() {
 }
 
 # =============================================================================
-# 硬盘品牌 / 产品系列
-# sysfs 的 device/vendor 常是 "ATA"（传输层标识，不是品牌），必须排除。
-# 优先用 smartctl -i 的 Model Family（厂商系列），再按型号前缀推断。
-# 推断结果一律带来源标注，不冒充固件官方字段。
+# 硬盘厂商 / 系列：只显示设备自己报出来的英文原文，不做任何品牌推断。
+#
+# 旧版有一张「型号前缀 → 中文品牌」的规则表（ST*→希捷、HUA*→日立…），
+# 遇到国产盘 / OEM 盘就会张冠李戴：例如标签上写着「华电通信 HUADIAN
+# COMMUNICATION」、型号 DGD67T1S3C2Z 的 SATA SSD，规则表既可能把它判成
+# 日立，也可能谁都不命中显示「未识别」。品牌是资产台账字段，猜错的危害
+# 比留空更大，所以整张规则表已删除。
+#
+# 现在只取两处设备/工具原文：smartctl -i 的 Model Family / Vendor，
+# 以及 sysfs 的 device/vendor（排除 ATA 这类传输层标识）。取不到就写「—」
+# 并注明来源，用户以盘体标签为准。型号列本来就是 lsblk MODEL / smartctl
+# Device Model 的原文，不再额外加工、不去前缀、不翻译成中文。
+# 输出三段（| 分隔）：厂商原文 | 系列原文 | 来源。设备原文里的 | 统一换成 /。
 # =============================================================================
-disk_brand_from_model() {
-    local u; u=$(echo "$1" | tr '[:lower:]' '[:upper:]')
-    case "$u" in
-        ST[0-9]*|SEAGATE*|EXOS*|IRONWOLF*|BARRACUDA*|SKYHAWK*|ARCHIVE*|CONSTELLATION*)
-            echo "Seagate 希捷" ;;
-        WD[0-9A-Z]*|WDC*|WESTERN*|ULTRASTAR*|RED*|BLUE*|BLACK*|PURPLE*|GOLD*|SN[0-9]*)
-            echo "Western Digital 西部数据" ;;
-        HGST*|HUS*|HUA*|HITACHI*|HTS*|IBM*)
-            echo "HGST 日立（现属西数）" ;;
-        TOSHIBA*|MQ0*|MD0*|DT01*|AL1*|MG0*|THNS*|Q300*|P300*|TR200*|XG*)
-            echo "Toshiba 东芝" ;;
-        KIOXIA*|KBG*|KXG*|EXCERIA*)
-            echo "Kioxia 铠侠" ;;
-        SAMSUNG*|MZ[VNTQ7]*|PM[89]*|SM[89]*|HD[0-9]*|SPINPOINT*)
-            echo "Samsung 三星" ;;
-        INTEL*|SSDSC*|SSDPE*|OPTANE*|DCS*|P4*|S4*)
-            echo "Intel" ;;
-        MICRON*|MTFD*|M600*|CRUCIAL*|CT[0-9]*|P[12345]*)
-            echo "Micron 镁光 / Crucial 英睿达" ;;
-        HYNIX*|SK*HYNIX*|SHGP*|HFS*|PC[34]*)
-            echo "SK hynix 海力士" ;;
-        KINGSTON*|SA400*|SUV*|SKC*|KC[236]*|A400*|A2000*|NV[123]*)
-            echo "Kingston 金士顿" ;;
-        SANDISK*|SD[0-9]*|ULTRA*|EXTREME*)
-            echo "SanDisk 闪迪（现属西数）" ;;
-        LITEON*|LITE-ON*|CV[138]*|PLEXTOR*|PX-*)
-            echo "LiteOn 建兴 / Plextor 浦科特" ;;
-        ADATA*|XPG*|ASX*|SU[678]*)
-            echo "ADATA 威刚" ;;
-        TRANSCEND*|TS[0-9]*)
-            echo "Transcend 创见" ;;
-        LENOVO*|SX[0-9]*|SL[0-9]*)
-            echo "Lenovo 联想" ;;
-        FORESEE*|LONGYSYS*|LONGSYS*|UNIC*|BIWIN*|GLOWAY*|KINGBANK*|NETAC*|GIGASTONE*|ZHITAI*|TIANJI*|MAXSUN*|COLORFUL*|DATO*|FANXIANG*)
-            echo "国产模组厂（江波龙 / 佰维 / 致钛 等）" ;;
-        *) echo "" ;;
-    esac
-}
+get_disk_ident() {
+    # $2 = lsblk MODEL，保留与旧 get_disk_brand 一致的调用签名，但不再用它
+    # 做任何规则推断（型号原文由「型号 / 类型 / 接口」列直接显示）。
+    local dev="/dev/${1}" sysv="$3"
+    local vendor="" family="" src="" si="" sc=""
 
-# 输出一行 "品牌|系列|识别依据"
-get_disk_brand() {
-    local name="$1" model="$2" sysv="$3" dev="/dev/${1}"
-    local family="" vendor="" brand="" how="" si=""
-    if [ "${SMART_BACKEND:-none}" = "smartctl" ] && [ -n "${SMARTCTL_BIN:-}" ] && [ -b "$dev" ]; then
-        si=$("$SMARTCTL_BIN" -i "$dev" 2>/dev/null)
+    # 与 SN 读取一样，不绑定 SMART 后端：后端走内嵌探针时也可以借用
+    # 同目录/系统里的 smartctl 读标识信息，不改变通电数据的后端。
+    if [ "${SMART_BACKEND:-none}" = "smartctl" ] && [ -n "${SMARTCTL_BIN:-}" ]; then
+        sc="$SMARTCTL_BIN"
+    elif command -v smartctl &>/dev/null; then
+        sc=$(command -v smartctl)
+    fi
+    if [ -n "$sc" ] && [ -b "$dev" ]; then
+        si=$("$sc" -i "$dev" 2>/dev/null)
         family=$(kv_get "$si" 'Model Family')
         vendor=$(kv_get "$si" 'Vendor')
-    fi
-    local model_brand=""
-    model_brand=$(disk_brand_from_model "$model")
-    if [ -n "$family" ]; then
-        brand=$(disk_brand_from_model "$family $model")
-        [ -z "$brand" ] && brand=$(echo "$family" | awk '{print $1}')
-        how="smartctl Model Family"
-        # 系列库与设备 IDENTIFY 型号结论冲突时，以型号为准，避免张冠李戴
-        if [ -n "$model_brand" ] && [ "$model_brand" != "$brand" ]; then
-            brand="$model_brand"; family=""
-            how="型号前缀（与 Model Family 不一致，已按型号优先）"
+        if [ -n "$family" ] || [ -n "$vendor" ]; then
+            src="smartctl -i（原文）"
         fi
     fi
-    if [ -z "$brand" ]; then
-        brand=$(disk_brand_from_model "$model")
-        [ -n "$brand" ] && how="型号前缀"
-    fi
-    if [ -z "$brand" ] && [ -n "$vendor" ]; then
-        case "$vendor" in ATA|VENDOR|Unknown|unknown|"") ;; *) brand="$vendor"; how="smartctl Vendor" ;; esac
-    fi
-    if [ -z "$brand" ] && [ -n "$sysv" ]; then
+    if [ -z "$vendor" ] && [ -n "$sysv" ]; then
         case "$sysv" in
-            ATA|VENDOR|Unknown|unknown|"0x0000"|"") ;;
-            *) brand="$sysv"; how="sysfs device/vendor" ;;
+            ATA|VENDOR|Unknown|unknown|"0x0000"|"Not Specified"|"") ;;
+            *) vendor="$sysv"; src="sysfs device/vendor（原文）" ;;
         esac
     fi
-    [ -z "$brand" ] && { brand="未识别"; how="型号 ${model:-未知} 未命中品牌规则"; }
-    printf '%s|%s|%s\n' "$brand" "${family:-—}" "$how"
+    # 传输层标识、占位串一律不当厂商
+    case "$vendor" in
+        ATA|VENDOR|Unknown|unknown|"0x0000"|"Not Specified"|"") vendor="" ;;
+    esac
+    case "$family" in
+        Unknown|unknown|"Not Specified"|"") family="" ;;
+    esac
+    [ -z "$src" ] && src="设备未报告厂商 / 系列"
+    # 显式写中文破折号，别用 ${var:--} 这种默认值语法——它给的是 ASCII
+    # 连字符 "-"，和下游判断用的 "—" 不是一个字符，空值会漏成 "-"
+    [ -z "$vendor" ] && vendor="—"
+    [ -z "$family" ] && family="—"
+    printf '%s|%s|%s\n' \
+        "$(echo "$vendor" | tr '|' '/')" \
+        "$(echo "$family" | tr '|' '/')" \
+        "$src"
 }
 
 # =============================================================================
@@ -2032,30 +2030,89 @@ get_disk_brand() {
 # 顺序按准确度排：smartctl -i（和盘体标签一致）→ lsblk → udev → sysfs。
 # 不把 WWN 当 SN：vpd_pg80 是 Unit Serial Number，vpd_pg83 是设备标识（含 WWN），不用。
 # =============================================================================
+# NVMe namespace 节点（/dev/nvme0n1）的 device/serial 通常不存在，序列号在
+# 控制器节点 /sys/class/nvme/nvme<N>/serial。$2 仅用于离线单测注入 sysfs 根，
+# 生产调用不传（默认 /sys），不引入全局变量。
+#
+# 只取由 $name 推导出的那一个控制器，绝不 glob 遍历 nvme*/serial：双 NVMe
+# 服务器上若 nvme0 的 serial 不可读而 nvme1 可读，通配兜底会把 nvme1 的 SN
+# 安到 nvme0n1 头上。SN 是资产台账关键字段，串号比「未提供」危害更大，
+# 宁可留空走 ⑤⑥ 兜底，也不拿别的控制器的值。
+disk_serial_nvme_sysfs() {
+    local name="$1" root="${2:-/sys}" ctrl="" f v
+    case "$name" in nvme*) ;; *) return 1 ;; esac
+    ctrl=$(echo "$name" | sed 's/^\(nvme[0-9][0-9]*\).*/\1/')
+    # 双保险：即使将来有人改回通配，也用前缀断言挡住别的控制器
+    local -a cand=()
+    cand+=("${root}/class/nvme/${ctrl}/serial")
+    cand+=("${root}/block/${name}/device/../serial")
+    cand+=("${root}/block/${name}/device/serial")
+    cand+=("${root}/class/block/${name}/device/serial")
+    for f in "${cand[@]}"; do
+        case "$f" in
+            "${root}"/class/nvme/*/serial)
+                [ "$(basename "$(dirname "$f")")" = "$ctrl" ] || continue ;;
+        esac
+        [ -r "$f" ] || continue
+        v=$(cat "$f" 2>/dev/null | tr -d '\n\r' | trim)
+        [ -n "$v" ] && { echo "$v"; return 0; }
+    done
+    return 1
+}
+
 get_disk_serial() {
     # 必须拆两条 local：同一 local 语句内 ${name} 在赋值生效前展开，
-    # dev 会取到调用者作用域的旧 name（传 $d 时路径错，三个 SN 源全废）
+    # dev 会取到调用者作用域的旧 name（传 $d 时路径错，SN 源全废）
     local name="$1"
-    local dev="/dev/${name}" sn="" src="" u f
+    local dev="/dev/${name}" sn="" src="" u f sc ctrl
 
-    # ① smartctl -i：希捷/西数/NVMe 都给 "Serial Number:"，与标签 SN 一致
-    if [ "${SMART_BACKEND:-none}" = "smartctl" ] && [ -n "${SMARTCTL_BIN:-}" ] && [ -b "$dev" ]; then
-        sn=$("$SMARTCTL_BIN" -i "$dev" 2>/dev/null \
-             | grep -iE '^[[:space:]]*Serial[[:space:]]*[Nn]umber[[:space:]]*:' \
+    # ① smartctl -i（与 SMART 数据采集后端解耦）
+    #    旧实现只在 SMART_BACKEND=smartctl 时才调 smartctl；若后端走内嵌
+    #    ioctl 探针或不可用，即使同目录/系统里有 smartctl 也完全跳过。而
+    #    NVMe / SATA SSD 的 SN 主要就靠 smartctl -i 提供，这是「固态盘读不到
+    #    SN」的主因之一。这里优先用当前后端选中的二进制，否则回退 PATH 里的
+    #    smartctl，仅用于读取标识信息，不改变 SMART 后端。
+    sc=""
+    if [ "${SMART_BACKEND:-none}" = "smartctl" ] && [ -n "${SMARTCTL_BIN:-}" ]; then
+        sc="$SMARTCTL_BIN"
+    elif command -v smartctl &>/dev/null; then
+        sc=$(command -v smartctl)
+    fi
+    if [ -n "$sc" ] && [ -b "$dev" ]; then
+        sn=$("$sc" -i "$dev" 2>/dev/null \
+             | grep -iE '^[[:space:]]*Serial[[:space:]]*([Nn]umber|[Nn]o\.?)[[:space:]]*:' \
              | head -1 | cut -d: -f2- | trim)
         [ -n "$sn" ] && src="smartctl -i"
+        # NVMe namespace 读不到时，退回控制器节点 /dev/nvme0
+        if [ -z "$sn" ]; then
+            case "$name" in
+                nvme*)
+                    ctrl=$(echo "$name" | sed 's/^\(nvme[0-9][0-9]*\).*/\1/')
+                    if [ -b "/dev/${ctrl}" ]; then
+                        sn=$("$sc" -i "/dev/${ctrl}" 2>/dev/null \
+                             | grep -iE '^[[:space:]]*Serial[[:space:]]*[Nn]umber[[:space:]]*:' \
+                             | head -1 | cut -d: -f2- | trim)
+                        [ -n "$sn" ] && src="smartctl -i（NVMe 控制器 ${ctrl}）"
+                    fi ;;
+            esac
+        fi
     fi
 
     # ② lsblk -o SERIAL（多数 Kylin / CentOS 7 上直接可用）
     if [ -z "$sn" ] && [ "${TOOL_LSBLK:-0}" -eq 1 ]; then
         sn=$(lsblk -d -n -o SERIAL "$dev" 2>/dev/null | head -1 | trim)
         [ -n "$sn" ] && src="lsblk"
+        # 老 util-linux 上 -d 与 SERIAL 组合会整条失败，去掉 -d 再试一次
+        if [ -z "$sn" ]; then
+            sn=$(lsblk -n -o SERIAL "$dev" 2>/dev/null | head -1 | trim)
+            [ -n "$sn" ] && src="lsblk（无 -d）"
+        fi
     fi
 
     # ③ udev 属性（CentOS 6 等老 lsblk 没有 SERIAL 列时很管用）
     if [ -z "$sn" ] && command -v udevadm &>/dev/null; then
         u=$(udevadm info --query=property --name="$dev" 2>/dev/null)
-        sn=$(echo "$u" | grep -iE '^(ID_SCSI_SERIAL|ID_SERIAL_SHORT)=' \
+        sn=$(echo "$u" | grep -iE '^(ID_SCSI_SERIAL|ID_SERIAL_SHORT|SCSI_IDENT_SERIAL)=' \
              | head -1 | cut -d= -f2- | trim)
         # ID_SERIAL 常是 "ATA_型号_SN"，取末段；仅在前面都没读到时用
         if [ -z "$sn" ]; then
@@ -2065,40 +2122,55 @@ get_disk_serial() {
         [ -n "$sn" ] && src="udevadm"
     fi
 
-    # ④ sysfs：NVMe / USB 盘的 device/serial
+    # ④ sysfs：SATA/USB 盘的 device/serial；NVMe 走控制器节点
     if [ -z "$sn" ]; then
-        for f in "/sys/block/${name}/device/serial" "/sys/class/block/${name}/device/serial"; do
+        for f in "/sys/block/${name}/device/serial" \
+                 "/sys/class/block/${name}/device/serial" \
+                 "/sys/block/${name}/device/../serial"; do
             [ -r "$f" ] || continue
-            sn=$(cat "$f" 2>/dev/null | trim)
+            sn=$(cat "$f" 2>/dev/null | tr -d '\n\r' | trim)
             [ -n "$sn" ] && { src="sysfs"; break; }
         done
+        if [ -z "$sn" ] && [ "${name#nvme}" != "$name" ]; then
+            sn=$(disk_serial_nvme_sysfs "$name" 2>/dev/null)
+            [ -n "$sn" ] && src="sysfs（NVMe 控制器）"
+        fi
     fi
 
     # ⑤ SCSI Unit Serial Number VPD page 0x80（SATA 盘经 libata 常在这里）
     #    前 6 字节是页头+描述符头，跳过后再取可打印字符
     if [ -z "$sn" ]; then
-        f="/sys/block/${name}/device/vpd_pg80"
-        if [ -r "$f" ]; then
+        for f in "/sys/block/${name}/device/vpd_pg80" \
+                 "/sys/class/block/${name}/device/vpd_pg80"; do
+            [ -r "$f" ] || continue
             sn=$(tail -c +7 "$f" 2>/dev/null | tr -cd '[:print:]' | trim)
-            [ -n "$sn" ] && src="sysfs VPD 0x80"
-        fi
+            [ -n "$sn" ] && { src="sysfs VPD 0x80"; break; }
+        done
+    fi
+
+    # ⑥ nvme-cli（装机自带时最准；离线机一般没有，放最后兜底）
+    if [ -z "$sn" ] && [ "${name#nvme}" != "$name" ] && command -v nvme &>/dev/null; then
+        ctrl=$(echo "$name" | sed 's/^\(nvme[0-9][0-9]*\).*/\1/')
+        sn=$(nvme id-ctrl "/dev/${ctrl}" 2>/dev/null \
+             | grep -iE '^sn[[:space:]]*:' | head -1 | cut -d: -f2- | trim)
+        [ -n "$sn" ] && src="nvme id-ctrl"
     fi
 
     if [ -z "$sn" ]; then
-        printf '%s\n%s\n' "" "未提供（USB 桥/RAID 卡不透传或内核未导出；以盘体标签为准）"
+        printf '%s\n%s\n' "" "未提供（虚拟盘/USB 桥/RAID 卡不透传、固件未导出 SN，或 SATA SSD 经桥接需 -d sat；以盘体标签为准，可试 sudo smartctl -i ${dev} 与 sudo smartctl -d sat -i ${dev}）"
     else
         printf '%s\n%s\n' "$sn" "$src"
     fi
 }
 
-# 硬盘：lsblk 枚举物理盘；品牌按 Model Family / 型号前缀推断；SN 四级回退。
-# 末尾「采集说明」一行汇总 SN 来源、品牌依据与存储控制器
+# 硬盘：lsblk 枚举物理盘；厂商/系列取设备原文（不推断品牌）；SN 六级回退。
+# 末尾「采集说明」一行汇总 SN 来源、厂商信息来源与存储控制器
 collect_disk_info() {
     log_info "正在收集硬盘信息..."
-    add_section "五、硬盘信息"
-    add_hdrN "盘符" "大小" "品牌 / 产品系列" "型号 / 类型 / 接口" "序列号 (SN)"
+    add_section "四、硬盘与 SMART 通电信息"
+    add_hdrN "盘符" "大小" "厂商 / 系列（设备原文）" "型号 / 类型 / 接口" "序列号 (SN)"
 
-    local disk_found=0 sn_sources="" brand_sources=""
+    local disk_found=0 sn_sources="" ident_sources=""
     if [ "$TOOL_LSBLK" -eq 1 ]; then
         # -P 键值对输出：空列也保留 KEY=""，MODEL 含空格、TRAN 为空都不会错位；
         # 老 util-linux 没有 -P/TRAN 时按能力分级降级（TRAN 列 2.23 才引入，
@@ -2181,21 +2253,19 @@ collect_disk_info() {
                 local detail="${model:-未知} / ${dtype}"
                 [ -n "$tran" ] && [ "$tran" != "-" ] && detail="${detail} / ${tran}"
 
-                local gb brand family bhow
-                gb=$(get_disk_brand "$name" "${model:-}" "$parts_raw")
-                brand=$(echo "$gb" | cut -d'|' -f1)
-                family=$(echo "$gb" | cut -d'|' -f2)
-                bhow=$(echo "$gb" | cut -d'|' -f3)
-                # Model Family 常带品牌前缀（如 "Hitachi/HGST Ultrastar 7K2"），
-                # 品牌列已有品牌，去掉前缀只留系列，避免 "HGST / 日立 / Hitachi/HGST ..." 三段拼接
-                local fam_short; fam_short=$(echo "$family" | sed \
-                    -e 's#^Hitachi/HGST ##' -e 's#^HGST ##' -e 's#^Seagate ##' \
-                    -e 's#^Western Digital ##' -e 's#^WDC ##' -e 's#^Samsung ##' \
-                    -e 's#^Toshiba ##')
-                local brand_col="$brand"
-                [ "$fam_short" != "—" ] && [ -n "$fam_short" ] \
-                    && brand_col="${brand_col} · ${fam_short}"
-                brand_sources="${brand_sources}${brand_sources:+; }${name}=${bhow}"
+                # 厂商 / 系列统一取设备报告原文，不做任何品牌规则推断
+                local gi vtext ftext isrc vendor_col
+                gi=$(get_disk_ident "$name" "${model:-}" "$parts_raw")
+                vtext=$(echo "$gi" | cut -d'|' -f1)
+                ftext=$(echo "$gi" | cut -d'|' -f2)
+                isrc=$(echo "$gi" | cut -d'|' -f3)
+                vendor_col="—"
+                [ "$vtext" != "—" ] && [ -n "$vtext" ] && vendor_col="$vtext"
+                if [ "$ftext" != "—" ] && [ -n "$ftext" ] && [ "$ftext" != "$vtext" ]; then
+                    if [ "$vendor_col" = "—" ]; then vendor_col="$ftext"
+                    else vendor_col="${vendor_col} · ${ftext}"; fi
+                fi
+                ident_sources="${ident_sources}${ident_sources:+; }${name}=${isrc}"
 
                 local gs sn snsrc
                 gs=$(get_disk_serial "$name")
@@ -2203,7 +2273,7 @@ collect_disk_info() {
                 snsrc=$(echo "$gs" | sed -n '2p')
                 [ -z "$sn" ] && sn="未提供"
                 sn_sources="${sn_sources}${sn_sources:+; }${name}=${snsrc}"
-                add_rowN "$name" "$size" "$brand_col" "$detail" "$sn"
+                add_rowN "$name" "$size" "$vendor_col" "$detail" "$sn"
             done <<< "$disks"
         fi
     else
@@ -2216,30 +2286,33 @@ collect_disk_info() {
                 # 分区不建 /sys/block/<name> 条目，借此只留整盘
                 [ -d "/sys/block/$d" ] || continue
                 disk_found=1
-                local sz="" gs sn snsrc gb2 b2 f2 h2
+                local sz="" gs sn snsrc gi2 v2 f2 h2 vendor2
                 [ -f "/sys/block/$d/size" ] && sz="$(( $(cat "/sys/block/$d/size" 2>/dev/null) * 512 / 1024 / 1024 / 1024 ))G"
                 gs=$(get_disk_serial "$d")
                 sn=$(echo "$gs" | sed -n '1p')
                 snsrc=$(echo "$gs" | sed -n '2p')
                 [ -z "$sn" ] && sn="未提供"
                 sn_sources="${sn_sources}${sn_sources:+; }${d}=${snsrc}"
-                gb2=$(get_disk_brand "$d" "" "")
-                b2=$(echo "$gb2" | cut -d'|' -f1)
-                f2=$(echo "$gb2" | cut -d'|' -f2)
-                h2=$(echo "$gb2" | cut -d'|' -f3)
-                brand_sources="${brand_sources}${brand_sources:+; }${d}=${h2}"
-                add_rowN "$d" "${sz:-未知}" "$b2" "型号未提供（无 lsblk） / 类型未知" "$sn"
+                gi2=$(get_disk_ident "$d" "" "")
+                v2=$(echo "$gi2" | cut -d'|' -f1)
+                f2=$(echo "$gi2" | cut -d'|' -f2)
+                h2=$(echo "$gi2" | cut -d'|' -f3)
+                vendor2="—"
+                [ "$v2" != "—" ] && [ -n "$v2" ] && vendor2="$v2"
+                if [ "$f2" != "—" ] && [ -n "$f2" ] && [ "$f2" != "$v2" ]; then
+                    [ "$vendor2" = "—" ] && vendor2="$f2" || vendor2="${vendor2} · ${f2}"
+                fi
+                ident_sources="${ident_sources}${ident_sources:+; }${d}=${h2}"
+                add_rowN "$d" "${sz:-未知}" "$vendor2" "型号未提供（无 lsblk） / 类型未知" "$sn"
             done
         fi
     fi
     [ "$disk_found" -eq 0 ] && add_rowN "未检测到磁盘" "" "" "" ""
-    # 三条来源注脚合并成一行，避免「序列号读取来源 / 品牌识别依据 / 存储控制器」占三行。
-    # 只有一块盘时去掉 "sda=" 这种多余前缀（表格里已经是单盘一行了）。
-    local sn_note="${sn_sources:-未检测到磁盘}" br_note="${brand_sources:-未检测到磁盘}"
+    # 来源注脚合并成一行；只有一块盘时去掉 "sda=" 这种多余前缀。
+    local sn_note="${sn_sources:-未检测到磁盘}" id_note="${ident_sources:-未检测到磁盘}"
     if ! echo "$sn_sources" | grep -q ';'; then sn_note="${sn_note#*=}"; fi
-    if ! echo "$brand_sources" | grep -q ';'; then br_note="${br_note#*=}"; fi
-    # 品牌可能是规则推断，也可能完全没命中；统一措辞不再笼统称「推断值」
-    local disk_notes="SN: ${sn_note}；品牌: ${br_note}（自动识别结果，以盘体标签为准）"
+    if ! echo "$ident_sources" | grep -q ';'; then id_note="${id_note#*=}"; fi
+    local disk_notes="SN: ${sn_note}；厂商/系列: ${id_note}（设备报告英文原文，未做品牌推断；以盘体标签为准）"
     if [ "$TOOL_LSPCI" -eq 1 ]; then
         local ctrls; ctrls=$(lspci 2>/dev/null | grep -iE 'SATA|AHCI|NVMe|SAS' | head -5 \
             | sed -e 's/^[0-9a-f:.]* //' \
@@ -2259,7 +2332,10 @@ collect_disk_info() {
 collect_smart_info() {
     log_info "正在收集硬盘 SMART 通电信息（后端: ${SMART_BACKEND}）..."
     smart_detect_env
-    add_section "五（补充）、硬盘 SMART 通电信息"
+    # SMART 通电信息并入第四节，标题用「四、硬盘与 SMART 通电信息」点明合并范围，
+    # 不再单独成章。后端程序 /
+    # 后端能力两行仍是本节首部信息，通电表格行数与列定义完全不变；与上一组
+    # 表格之间由 main 里的 add_blank 分隔。
     add_row "运行环境" "$SMART_ENV_DESC"
     [ "$SMART_ENV_IS_VM" -eq 1 ] && add_row "环境判定依据" "$SMART_ENV_REASON"
     add_row "SMART 后端" "$SMART_BACKEND"
@@ -2410,7 +2486,7 @@ short_pci_desc() {
 # DOWN 口速率写「—」而非「未知」（未插线本就读不到，不是采集失败）
 collect_network_info() {
     log_info "正在收集网卡信息..."
-    add_section "六、网卡信息"
+    add_section "五、网卡信息"
     add_subheader "接口名" "MAC 地址" "型号 / 状态 / 速率 / IP"
 
     local iface_found=0
@@ -2477,7 +2553,7 @@ collect_network_info() {
 # 必须跳过，否则会被 cut 成 9 个相同字段写进表格（历史 bug）
 collect_gpu_info() {
     log_info "正在收集 GPU 信息..."
-    add_section "七、GPU 信息"
+    add_section "六、GPU、驱动与软件版本"
 
     local gpu_found=0
     local nvidia_pci_addrs=""
@@ -2571,7 +2647,7 @@ collect_gpu_info() {
 }
 
 # =============================================================================
-# 七（补充）、驱动与软件版本
+# 驱动与软件版本：并入第六节，标题用「六、GPU、驱动与软件版本」点明合并范围
 # 网卡驱动：ethtool -i（driver / version / firmware-version）→ sysfs driver 链接
 #           → modinfo -F version / /sys/module/<mod>/version。
 # 其他 PCI 驱动：/sys/bus/pci/devices/*/driver + class 分类，不依赖 lspci -k
@@ -2715,7 +2791,6 @@ merge_pci_records() {
 
 collect_driver_versions() {
     log_info "正在收集驱动与软件版本..."
-    add_section "七（补充）、驱动与软件版本"
     add_hdrN "设备 / 接口" "类型" "驱动模块" "驱动 / 软件版本" "固件版本" "来源"
 
     # ---- 网卡 ----
@@ -3014,7 +3089,7 @@ compact_tag() {
 # 分区与挂载：lsblk -P 结构化 → lsblk 原样文本 + blkid → /proc 兜底；
 # 输出紧凑 6 列树形表，用量只对已挂载项用 df 计算
 collect_partition_info() {
-    local no="${1:-八}"
+    local no="${1:-七}"
     log_info "正在收集硬盘分区与挂载信息..."
     add_section "${no}、硬盘分区与挂载信息"
     add_hdrN "分区 / 设备" "大小" "文件系统" "挂载点" "用量 (已用/可用/率)" "标签 / UUID"
@@ -3145,19 +3220,19 @@ collect_partition_info() {
 }
 
 # -d 详细段：sysfs 块设备参数 + SMART 摘要 + hdparm/dd/fio/ioping 性能测试。
-# SMART 完整表格在「五（补充）」，这里只给摘要与固件/扇区计数等独有项
-# 中文章节序号：不带 -d 时分区表是「八」；带 N 块盘时性能测试从「八」
+# SMART 完整表格在「四、硬盘与 SMART 通电信息」，这里只给摘要与固件/扇区计数等独有项
+# 中文章节序号：不带 -d 时分区表是「七」；带 N 块盘时性能测试从「七」
 # 起顺延 N 个，分区表紧随其后。表外用阿拉伯数字兜底，避免超出数组越界。
 cn_section_no() {
     local idx="${1:-0}"
-    local -a cn=(八 九 十 十一 十二 十三 十四 十五 十六 十七 十八 十九 二十)
+    local -a cn=(七 八 九 十 十一 十二 十三 十四 十五 十六 十七 十八 十九 二十)
     [ "$idx" -lt 0 ] && idx=0
     if [ "$idx" -lt "${#cn[@]}" ]; then echo "${cn[$idx]}"
-    else echo "$((8 + idx))"; fi
+    else echo "$((7 + idx))"; fi
 }
 
 collect_disk_perf_info() {
-    local disk="$1" sec_no="${2:-八}"
+    local disk="$1" sec_no="${2:-七}"
     local dn; dn=$(basename "$disk")
     log_info "正在收集硬盘详细信息并进行性能测试: ${disk}"
 
@@ -3284,8 +3359,9 @@ collect_disk_perf_info() {
 
     # sysfs device/vendor 常是 "ATA"（传输层标识，不是品牌）；device/model 还会被
     # 截断（真机出现过 "HGST HUS722T1TAL" 少了尾部 A604）。优先用 smartctl -i 的
-    # 完整型号 + 型号前缀推断品牌，两者都没有才退回 sysfs 的值。
-    local full_model="$device_model" brand="" si_m sm lm
+    # 型号一律显示设备报告原文（lsblk MODEL / smartctl Device Model / sysfs），
+    # 不再拼任何按型号前缀推断出来的中文品牌，避免国产盘被张冠李戴。
+    local full_model="$device_model" si_m sm lm
     # lsblk MODEL 多数系统给完整型号（无 smartctl 时用它兜底，避免 sysfs 截断值）
     if [ "$TOOL_LSBLK" -eq 1 ]; then
         lm=$(lsblk -n -d -o MODEL "$disk" 2>/dev/null | head -1 | trim)
@@ -3297,9 +3373,8 @@ collect_disk_perf_info() {
              | head -1 | cut -d: -f2- | trim)
         [ -n "$sm" ] && full_model="$sm"
     fi
-    [ -n "$full_model" ] && brand=$(disk_brand_from_model "$full_model")
     if [ -n "$full_model" ] && [ "$full_model" != "MODEL" ]; then
-        add_row "型号 / 品牌" "${full_model}${brand:+ · ${brand}}"
+        add_row "型号（设备原文）" "$full_model"
     fi
     # 7 个 sysfs 参数原来是 7 行，全是短值，占了大半屏。按语义并成 3 行，
     # 值列横跨 5 列，一行放得下，字段一个不少。
@@ -3602,7 +3677,7 @@ main() {
     echo "=============================================="
     echo "  Linux 硬件配置信息导出工具 v${SCRIPT_VERSION}"
     echo "  交付: Excel XML Spreadsheet (.xls) · 6 列紧凑表格 · 多页签追加"
-    echo "  采集: CPU多路 / 内存 / 硬盘品牌·SN / 通电·出厂 / 网卡 / GPU / 驱动·软件版本 / 分区挂载"
+    echo "  采集: 七节 · 基本信息与系统版本 / CPU / 内存 / 硬盘与SMART通电 / 网卡 / GPU·驱动·软件版本 / 分区挂载"
     echo "  离线: 单文件免安装，SMART 四级后端回退；-d 可附硬盘性能测试"
     echo "=============================================="
     echo ""
@@ -3633,8 +3708,23 @@ main() {
 
     reset_rows
 
+    # v5.21.x 及以前是十节编号（含两个补充章节、系统版本单独成章），
+    # v5.22 起是七节。往旧文件追加页签会让同一个 .xls 里并存两套章节号，
+    # 不能静默混编：日志给一行 INFO，并在新页签顶部写明建议另起文件。
+    # 判据只用旧版独有的标题串，不会误判本版带 -d 时出现的「八、…」。
+    local legacy_hint=""
+    if [ -f "$OUTPUT_FILE" ] \
+       && { grep -q '（补充）' "$OUTPUT_FILE" 2>/dev/null \
+            || grep -q '二、系统版本信息' "$OUTPUT_FILE" 2>/dev/null; }; then
+        legacy_hint="检测到本文件已有旧版（v5.21.x 十节编号）页签；本页签为 v5.22.1 七节结构，同文件内章节号会不一致。建议删除本 .xls 后重新生成，或用 -o 另存新文件"
+        log_info "检测到旧版章节编号页签：建议删除 ${OUTPUT_FILE} 后重新生成，或用 -o 另存新文件（避免同文件混用两套编号）"
+    fi
+
     add_title "$title_text"
     add_blank
+    if [ -n "$legacy_hint" ]; then
+        add_row "版本提示" "$legacy_hint"
+    fi
 
     collect_os_info;      add_blank
     collect_cpu_info;     add_blank
@@ -3645,7 +3735,7 @@ main() {
     collect_gpu_info;     add_blank
     collect_driver_versions; add_blank
 
-    # 多盘时每块盘单独成章，章节号从「八」顺延；分区表排在最后一块之后
+    # 多盘时每块盘单独成章，章节号从「七」顺延；分区表排在最后一块之后
     local _perf_disk _perf_idx=0 _perf_no part_no
     for _perf_disk in "${DISK_DEVICES[@]}"; do
         _perf_no=$(cn_section_no "$_perf_idx")
