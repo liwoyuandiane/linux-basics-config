@@ -13,7 +13,7 @@
 #         六、GPU、驱动与软件版本 / 七、硬盘分区与挂载信息；
 #         -d 时性能测试从「七」顺延。
 # SMART : 通电时长、通电次数、健康、温度、SN、出厂装配日期。四级后端回退
-#         （详见 --help-full 第五节）：
+#         （详见 --help-full 第 5 节）：
 #           ① 环境变量 SMARTCTL_BIN / 同目录静态 smartctl.<架构>
 #           ② 系统 PATH 里的 smartctl
 #           ③ 内嵌 Python 原生 ioctl 探针（零安装零携带）
@@ -25,7 +25,7 @@
 # 注释约定：'# ====' 分章节，'# ----' 分小节，'#' 说明设计意图与已知坑。
 # =============================================================================
 
-SCRIPT_VERSION="5.22.1"
+SCRIPT_VERSION="5.22.3"
 SCRIPT_NAME=$(basename "$0")
 
 # ---- 硬盘性能测试配置 ----
@@ -87,7 +87,7 @@ summary_errors() {
 # 检查文件是否可写
 check_file_writable() {
     local file_path="$1"
-    local dir_path; dir_path=$(dirname "$file_path")
+    local dir_path; dir_path=$(dirname -- "$file_path")
 
     if [ ! -d "$dir_path" ]; then
         record_error "输出目录不存在: ${dir_path}"
@@ -151,17 +151,20 @@ show_help_full() {
 ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
 用法: ${SCRIPT_NAME} [选项] [输出目录]
 
-一、输出与页签
+  编号约定：本说明用 1.~9. 编号；Excel 页签内的报表章节用中文数字「一~七」
+  编号，两套互不相干。下面第 2 节清单中出现的「一、」「四、」等均指报表章节。
+
+1. 输出与页签
   collect_hw_info.xls 为 Excel XML Spreadsheet，重复执行会追加新页签。
   页签名为 <3位序号>-<设备标识SN>，例如 001-ZFA1BFP9。整机 DMI 序列号读不到
   （Kylin/飞腾机器常回 "Not Set"）时自动改用第一块硬盘 SN，再退回主机名。
   序号前缀必须保留：Excel 不允许同名页签。
   -o 可直接指定输出文件名与路径，父目录不存在会自动创建。
 
-二、报表章节（v5.22 起七节，一个模块一个序号，无补充章节；合并节标题按实际内容命名）
+2. 报表章节（v5.22 起七节，一个模块一个序号，无补充章节；合并节标题按实际内容命名）
   一、基本信息与系统版本
       主机名 / 采集时间 / 设备序列号 + 操作系统 / 架构 / 内核 / BIOS /
-      主板 / 制造商（原「二、系统版本」并入，两组行之间保留空行分隔）
+      主板 / 制造商（原「二、系统版本信息」并入，两组行之间保留空行分隔）
   二、CPU 信息
       路数（单/双/多路）、每路核心、物理核心总数、SMT、NUMA、每颗插槽明细
   三、内存信息
@@ -188,7 +191,7 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   用量(已用/可用/率) / 标签·UUID，下方汇总压成两行。
   列宽为整表共用，不足 6 列的表格末格自动跨列，长文本不会被挤成多行。
 
-三、驱动与软件版本
+3. 驱动与软件版本
   网卡：ethtool -i 取 driver / version / firmware-version；无 ethtool 时读
   /sys/class/net/<iface>/device/driver 链接，再用 modinfo -F version 或
   /sys/module/<mod>/version 补版本。同驱动同版本的多个网口合并成一行。
@@ -203,7 +206,7 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   版本落在「驱动 / 软件版本」列、来源列附服务端路径。要加 nginx /
   openssl 等，照 sshd 那行继续 add_rowN 即可，表格结构不用改。
 
-四、硬盘 SN 与出厂日期
+4. 硬盘 SN 与出厂日期
   SN 六级回退：① smartctl -i（与 SMART 后端解耦：旧版后端走内嵌探针时
   即使有 smartctl 也不读标识，这是 SATA/NVMe 固态盘漏 SN 的主因；NVMe 另
   试控制器节点 /dev/nvmeN）→ ② lsblk -o SERIAL（-d 组合失败时去掉 -d 重试）
@@ -220,7 +223,7 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   不等于首次使用日期；FARM 通电小时会与 SMART 通电小时交叉核对，不一致时
   提示疑似计数器被重置。
 
-五、离线 / 免安装（SMART 通电信息）
+5. 离线 / 免安装（SMART 通电信息）
   不需要在目标机联网或安装软件包。当前部署只需三个文件：
     collect_hw_info.sh  smartctl.aarch64  smartctl.amd64
   四级后端回退（优先级）：
@@ -240,20 +243,20 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   （aarch64 / amd64 等），只有裸名 ./smartctl 可以不带；读取 SMART 需 root。
   纯 Bash/sh 无法发 ioctl，所以"零依赖"只能是脚本+解释器，或脚本+已编译 ELF。
 
-六、环境变量
+6. 环境变量
     SMARTCTL_BIN=/path/to/smartctl   指定随包 smartctl 路径
-    SMART_PY=/usr/bin/python3        指定 python3 解释器路径
+    SMART_PY=/usr/bin/python3        优先指定 python3；不可执行/自检未过自动回退系统 python3
     SMART_FORCE_NATIVE=1             跳过所有 smartctl 候选，强制用内嵌 ioctl 探针
                                     （仅用于对照测试"机器上完全没装 smartctl"）
 
-七、注意
+7. 注意
   读取 SMART 需要 root（或 CAP_SYS_RAWIO），与是否安装工具无关。
   虚拟机磁盘、云块存储（如 Oracle BlockVolume）、部分 USB 桥接、硬件 RAID
   卡后的盘不提供物理通电计数器：显示「未获取到」属预期行为，脚本会识别
   虚拟环境并在 Excel 写明原因，且不计入警告；请在宿主机或物理机采集。
   健康状态显示 OK 仅为设备自评，不代表有完整属性表。物理机读不到才计警告。
 
-八、命令行约定
+8. 命令行约定
   -h 只给简短用法，-H 给本说明，-v 只打印版本号。
   参数错误打印一行可操作提示并 exit 2（便于批量脚本判断成败），不会静默成功。
   日志口径：[WARN]/[ERROR] 行数与汇总计数一致；候选跳过、可选工具缺失、
@@ -267,7 +270,7 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   -d 可多次指定（自动去重保序，开跑前校验块设备），每盘单独成章；
   章节号从「七」顺延，分区表排在最后一块之后；不带 -d 时分区表即「七」。
 
-九、示例
+9. 示例
   ${SCRIPT_NAME}                                # 当前目录生成
   ${SCRIPT_NAME} -o /tmp/机房A-01.xls           # 指定输出文件名
   ${SCRIPT_NAME} -d /dev/sda -s 5G /tmp         # 5G 测试并输出到 /tmp
@@ -373,10 +376,21 @@ if [ -n "$OUTPUT_FILE_OVERRIDE" ]; then
 else
     OUTPUT_FILE="${OUTPUT_DIR}/collect_hw_info.xls"
 fi
+# 路径以 - 开头会被 dirname/basename/mkdir 当成选项（-- 之后的一切也按目录
+# 处理，用户容易把 -d 误留在 -- 后面），一律提前给出可操作提示而非裸 GNU 报错
+case "$OUTPUT_FILE" in
+    -*) usage_error "输出路径不能以 - 开头: ${OUTPUT_FILE}（请改用 ./${OUTPUT_FILE} 或绝对路径；若要测磁盘请把 -d 放在 -- 之前）" ;;
+esac
 # 常见 CLI 约定：目标父目录不存在时自动创建；创建失败（权限/路径非法）
 # 立即按参数错误 exit 2，不能吞掉后等采集完才暴露
-OUT_DIR_ACTUAL=$(dirname "$OUTPUT_FILE")
+OUT_DIR_ACTUAL=$(dirname -- "$OUTPUT_FILE")
 if [ ! -d "$OUT_DIR_ACTUAL" ]; then
+    # 已存在但不是目录：普通文件 / 块设备 / 悬空链接都会走到这里。
+    # 最常见的误用是把磁盘路径当成输出目录（如 ./collect_hw_info.sh /dev/sda），
+    # 明确区分于"权限不足"，并直接给出正确写法。
+    if [ -e "$OUT_DIR_ACTUAL" ]; then
+        usage_error "输出目录位置已被非目录文件占用: ${OUT_DIR_ACTUAL}（它是文件/块设备而非目录；若要测这块盘请用 -d ${OUT_DIR_ACTUAL}，输出目录另指定，如 . 或 /tmp）"
+    fi
     mkdir -p "$OUT_DIR_ACTUAL" 2>/dev/null \
         || usage_error "无法创建输出目录: ${OUT_DIR_ACTUAL}（权限不足或路径非法）"
 fi
@@ -545,7 +559,7 @@ add_table_row() {
     </Row>"
 }
 
-# 「五、硬盘信息」曾用的 4 列版本，保留以兼容旧调用
+# 早期 4 列表头版本，保留以兼容旧调用（现统一为 6 列紧凑表）
 add_subheader4() {
     DATA_ROWS="${DATA_ROWS}
     <Row>$(_cell_list "label" "$@")
@@ -724,12 +738,12 @@ smart_get_disk_mfg() {
         fi
     fi
 
-    # 型号与 SN 已在「五、硬盘信息」单独成列，这里不再重复，只写来源与查询建议
+    # 型号与 SN 已在「四、硬盘与 SMART 通电信息」单独成列，这里不再重复
     note=""
     if [ -z "$date" ]; then
         date="未提供"
         src="无标准字段"
-        note="凭 SN 查厂商官网或盘体标签（型号/SN 见「五、硬盘信息」）"
+        note="凭 SN 查厂商官网或盘体标签（型号/SN 见本节上方硬盘信息表）"
         if [ "${SMARTCTL_FARM_OK:-0}" -eq 0 ] && [ "$backend" = "smartctl" ]; then
             note="${note}；当前后端不支持 FARM，换希捷盘也读不到装配日期（见上方「后端能力」行）"
         fi
@@ -1256,7 +1270,7 @@ smart_use_binary() {
 # ③ 内嵌 ioctl 探针（独立成函数，便于 SMART_FORCE_NATIVE 强制走这条路做对照）
 smart_try_native() {
     SMART_NATIVE_FAIL_REASON=""
-    local probe_ok=0 py_found=0 c cand d
+    local probe_ok=0 py_found=0 c cand d probe_out
     if [ -f "${SCRIPT_DIR}/smart_probe.py" ]; then
         SMART_PROBE_PY="${SCRIPT_DIR}/smart_probe.py"
         probe_ok=1
@@ -1278,9 +1292,13 @@ smart_try_native() {
             return 1
         fi
     fi
+    # 自检必须同时满足 rc=0 且输出含探针自己的标记：只看返回码时，
+    # /bin/true、空壳包装脚本等"假解释器"会被误判为可用，随后真正采集
+    # 拿到空输出 → 通电信息静默留空且无诊断。标记来自探针 self_test()。
     if [ -n "$SMART_PY" ] && [ -x "$SMART_PY" ]; then
         py_found=1
-        if "$SMART_PY" "$SMART_PROBE_PY" --self-test >/dev/null 2>&1; then
+        if probe_out=$("$SMART_PY" "$SMART_PROBE_PY" --self-test 2>/dev/null) \
+           && printf '%s' "$probe_out" | grep -q '^OK  ATA/NVMe'; then
             SMART_BACKEND="native"; return 0
         fi
     fi
@@ -1288,7 +1306,8 @@ smart_try_native() {
         if command -v "$c" &>/dev/null; then
             py_found=1
             cand=$(command -v "$c")
-            if "$cand" "$SMART_PROBE_PY" --self-test >/dev/null 2>&1; then
+            if probe_out=$("$cand" "$SMART_PROBE_PY" --self-test 2>/dev/null) \
+               && printf '%s' "$probe_out" | grep -q '^OK  ATA/NVMe'; then
                 SMART_PY="$cand"; SMART_BACKEND="native"; return 0
             fi
         fi
@@ -2415,7 +2434,7 @@ collect_smart_info() {
 
     # ---- 出厂 / 装配日期（固件提供时才有，没有标准字段）----
     add_blank
-    add_subheader "盘符（出厂信息）" "出厂 / 装配日期" "日期来源 / 说明（型号与 SN 见上一节）"
+    add_subheader "盘符（出厂信息）" "出厂 / 装配日期" "日期来源 / 说明（型号/SN 见本节上方硬盘信息表）"
     for name in $devs; do
         [ -z "${name// /}" ] && continue
         disk_path="/dev/${name}"
@@ -2653,7 +2672,7 @@ collect_gpu_info() {
 # 其他 PCI 驱动：/sys/bus/pci/devices/*/driver + class 分类，不依赖 lspci -k
 #           （CentOS 6 老 pciutils 可能没有 -k）。
 # 软件版本：本节先只放 sshd；以后要加 nginx / openssl 等，在 sshd 那行下面
-#           照样 add_row 即可，无需改表格结构。
+#           照样 add_rowN（六列对齐）即可，无需改表格结构；与 --help-full 第 3 节一致。
 # 坑：sshd -V 只有较新 OpenSSH 才支持，老系统（CentOS 6 的 5.3p1、
 #     Kylin V10 的 8.2p1）会报 illegal option -- V，必须多级回退。
 # =============================================================================
@@ -2796,7 +2815,7 @@ collect_driver_versions() {
     # ---- 网卡 ----
     local ifaces="" rec="" iface drv ver fw ei mod src="" bus kind=""
     if [ "$TOOL_IP" -eq 1 ]; then
-        # 与「六、网卡信息」保持一致：ip link 里的 eth0@if5 之类别名要去掉
+        # 与「五、网卡信息」保持一致：ip link 里的 eth0@if5 之类别名要去掉
         # @后缀，否则 ethtool -i "$iface" 拿不到驱动，两节接口集合也会对不上
         ifaces=$(ip link show 2>/dev/null | grep -E '^[0-9]+:' | grep -v 'lo:' \
                  | awk -F': ' '{print $2}' | cut -d'@' -f1 | awk '{print $1}')
@@ -3339,7 +3358,7 @@ collect_disk_perf_info() {
         fi
     fi
 
-    # 容量优先取 lsblk，与「五、硬盘信息」同口径：sysfs size*512 再 numfmt 会得到
+    # 容量优先取 lsblk，与「四、硬盘与 SMART 通电信息」同口径：sysfs size*512 再 numfmt 会得到
     # 932G，而 lsblk 给 931.5G，同一块盘在两节里数字不一致会让人以为换过盘。
     local size_hr=""
     if [ "$TOOL_LSBLK" -eq 1 ]; then
@@ -3716,7 +3735,7 @@ main() {
     if [ -f "$OUTPUT_FILE" ] \
        && { grep -q '（补充）' "$OUTPUT_FILE" 2>/dev/null \
             || grep -q '二、系统版本信息' "$OUTPUT_FILE" 2>/dev/null; }; then
-        legacy_hint="检测到本文件已有旧版（v5.21.x 十节编号）页签；本页签为 v5.22.1 七节结构，同文件内章节号会不一致。建议删除本 .xls 后重新生成，或用 -o 另存新文件"
+        legacy_hint="检测到本文件已有旧版（v5.21.x 十节编号）页签；本页签为 v5.22.3 七节结构，同文件内章节号会不一致。建议删除本 .xls 后重新生成，或用 -o 另存新文件"
         log_info "检测到旧版章节编号页签：建议删除 ${OUTPUT_FILE} 后重新生成，或用 -o 另存新文件（避免同文件混用两套编号）"
     fi
 
@@ -3797,14 +3816,14 @@ main() {
 
     local ws_xml; ws_xml=$(make_worksheet_xml "$sheet_name" "$sheet_data")
 
-    local out_dir; out_dir=$(dirname "$OUTPUT_FILE")
+    local out_dir; out_dir=$(dirname -- "$OUTPUT_FILE")
 
     if [ ! -f "$OUTPUT_FILE" ]; then
         # mktemp 同目录临时文件 + mv 原子落位：直接 cat > 目标路径时中途失败
         # （磁盘满等）会留下半截文件，下次运行又把它当「已有文件」去追加，
         # 损坏被固化
         local tmp_out
-        tmp_out=$(mktemp "${out_dir}/.$(basename "$OUTPUT_FILE").new_XXXXXX" 2>/dev/null)
+        tmp_out=$(mktemp "${out_dir}/.$(basename -- "$OUTPUT_FILE").new_XXXXXX" 2>/dev/null)
         if [ -z "$tmp_out" ]; then
             record_error "无法在 ${out_dir} 创建临时文件"
             summary_errors
@@ -3846,7 +3865,7 @@ XLSHEAD
         fi
 
         local backup_file
-        backup_file=$(mktemp "${out_dir}/.$(basename "$OUTPUT_FILE").bak_XXXXXX" 2>/dev/null)
+        backup_file=$(mktemp "${out_dir}/.$(basename -- "$OUTPUT_FILE").bak_XXXXXX" 2>/dev/null)
         if [ -z "$backup_file" ] || ! cp "$OUTPUT_FILE" "$backup_file" 2>/dev/null; then
             record_error "无法创建备份，拒绝追加: ${OUTPUT_FILE}"
             rm -f "$backup_file" 2>/dev/null
