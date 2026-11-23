@@ -100,10 +100,11 @@ check_file_writable() {
         record_error "输出目录不存在: ${dir_path}"
         return 1
     fi
-    # 共享目录下预埋符号链接会让 root 顺着链覆盖任意文件，一律拒收
+    # 共享目录下预埋符号链接会让 root 顺着链覆盖任意文件，一律拒收。
+    # 与目录/特殊文件同属"路径类型错误"，统一返回 2，避免同类拒绝两种退出码。
     if [ -h "$file_path" ]; then
         record_error "输出路径是符号链接，拒绝写入: ${file_path}"
-        return 1
+        return 2
     fi
     # P1 硬拦截：-o 指向目录 / 字符设备 / 块设备 / FIFO / socket 时，旧版静默
     # 把节点替换成 16KB XML（实测用 /tmp/fakedev c 1 3 和 /tmp/fakefifo 复现）。
@@ -294,10 +295,11 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
 
 8. 命令行约定
   -h 只给简短用法，-H 给本说明，-v 只打印版本号。
-  参数错误打印一行可操作提示并 exit 2（便于批量脚本判断成败），不会静默成功。
+  参数 / 路径类型错误（如 -o 指向目录、设备、FIFO、socket、符号链接）打印
+  一行可操作提示并 exit 2（便于批量脚本判断成败），不会静默成功。
   日志口径：[WARN]/[ERROR] 行数与汇总计数一致；候选跳过、可选工具缺失、
   写测试路径提示等用 [INFO]，不计入警告；汇总行本身不带前缀。
-  退出码：参数错误 exit 2；采集/写盘/加锁等硬错误 exit 1；性能项缺值
+  退出码：参数 / 路径类型错误 exit 2；采集/写盘/加锁等硬错误 exit 1；性能项缺值
   （dd/fio/ioping 没拿到数值、测试目录空间不足）只记警告、不判失败，
   硬件信息照常交付。页签数达到 ${MAX_SHEETS} 上限也按硬错误 exit 1，
   并打印"备份 → 删除 → 重试"的具体操作提示。
@@ -3144,7 +3146,10 @@ fmt_size_kb() {
 # 用量压成一行：13G/44G (23%)；未挂载或读不到给 —
 partition_usage_short() {
     local mnt="$1" dfo=""
-    [ -z "$mnt" ] || [ "$mnt" = "—" ] && { echo "—"; return; }
+    if [ -z "$mnt" ] || [ "$mnt" = "—" ]; then
+        echo "—"
+        return
+    fi
     [ "$mnt" = "[SWAP]" ] && { echo "交换分区"; return; }
     dfo=$(df -P -h "$mnt" 2>/dev/null | tail -1)
     [ -z "$dfo" ] && dfo=$(df -h "$mnt" 2>/dev/null | tail -1)
@@ -3296,9 +3301,12 @@ collect_partition_info() {
         done
     fi
 
-    # ③ 无 lsblk：/proc/partitions + /proc/mounts 兜底（列表格式，无树形）
-    if [ "$total" -eq 0 ]; then
-        src="/proc/partitions + /proc/mounts（无 lsblk）"
+    # ③ lsblk 不可用（未安装，或 -P / plain 都没给出有效条目）时，
+    # 用 /proc/partitions + /proc/mounts 兜底（列表格式，无树形）。
+    # 必须同时看 _p_ok：lsblk 可用、只是条目被虚拟盘过滤光时 total 也是 0，
+    # 此时不能重复兜底，也不能把来源写成"无 lsblk"（描述失实）。
+    if [ "$total" -eq 0 ] && [ "${_p_ok:-0}" -eq 0 ]; then
+        src="/proc/partitions + /proc/mounts（lsblk 不可用或无有效条目）"
         local raw mj minor blocks dname sz2 mntline mnt2 typ2
         raw=$(awk 'NR>2 {print $1, $2, $3, $4}' /proc/partitions 2>/dev/null \
               | grep -vE ' (loop|ram|zram|dm-|md|sr|fd|nbd|pmem)')
@@ -3936,16 +3944,13 @@ main() {
             sleep 1
         done
         if [ "$_lock_ok" -ne 1 ]; then
-            # 失败者绝不能设 LOCK_FILE：否则 EXIT trap 会把持有者的锁文件从
-            # 磁盘提前删掉，后续新实例将创建新 inode 加锁成功，互斥失效
+            # 抢锁超时：关闭本进程打开的 fd 200 后报错。锁文件本身不删除
+            # （EXIT trap 只关 fd，不 rm），由内核在持有者退出时释放。
             exec 200>&-
             record_error "无法获取写锁: ${OUTPUT_FILE} 长时间被其他实例占用，或锁文件不可访问"
             summary_errors
             return 1
         fi
-        # 故意不用 local：cleanup_smart_runtime 由 EXIT trap 触发时 main 已返回，
-        # local 变量届时已销毁，锁文件就删不掉了
-        LOCK_FILE="${OUTPUT_FILE}.lock"
     fi
 
     # ---- 锁内：单文件页签上限 ----
