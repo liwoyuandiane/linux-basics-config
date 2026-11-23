@@ -109,7 +109,8 @@ check_file_writable() {
     # 把节点替换成 16KB XML（实测用 /tmp/fakedev c 1 3 和 /tmp/fakefifo 复现）。
     # 目录场景退出码为 0 且消息"文件已创建 /existing/dir"，并在目录里残留
     # .odir.new_XXXXXX 临时文件，批量巡检里会产生假阴性日志 + 磁盘垃圾。
-    # 修复后直接报错 exit 2，与"父路径不存在"语义保持一致。
+    # 修复后按"参数/路径类型错误"返回 2（与 README「参数错误 exit 2」一致），
+    # 由 main 透传，不再被 `if ! ...` 吞成 1。
     if [ -d "$file_path" ]; then
         record_error "输出路径是目录，请换成文件名: ${file_path}"
         return 2
@@ -454,7 +455,9 @@ xml_esc() {
     #    （例如 smartctl "12345\n 678" 的两行会连成 "12345 678" 可读，
     #    旧版直接删除则变成 "12345678"）；
     # 3) 其他控制字符（0x00-0x08, 0x0B-0x1F）必须删除：XML 1.0 不接受。
-    printf '%s\n' "$1" \
+    # 用 printf '%s'（不能带 \n）：下面的 tr 会把换行映射成空格，若 printf
+    # 自带一个换行，每个非空单元格都会多出尾随空格，污染文本和精确匹配。
+    printf '%s' "$1" \
         | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' \
         | tr '\n\r\t' '   ' \
         | tr -d '\000-\010\013-\037'
@@ -837,7 +840,11 @@ cleanup_smart_runtime() {
         exec 200>&- 2>/dev/null
     fi
 }
-trap cleanup_smart_runtime EXIT INT TERM
+trap cleanup_smart_runtime EXIT
+# 单独接管 INT/TERM：默认 handler 返回后 bash 会继续执行，Ctrl-C 实际不会
+# 中止采集（还会继续写盘）。这里显式 exit，并让 EXIT trap 负责清理。
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # 内嵌探针源码（单文件分发时用；与随包 smart_probe.py 内容完全一致）
 write_embedded_probe() {
@@ -1820,8 +1827,10 @@ collect_cpu_info() {
         # 时 dmi_socks 被初始化成 0，会出现"有效插槽 0"这种误导行（非 root
         # 虚拟机 ARM 平台实测复现）。
         local dmi_note=""
-        if [ "$TOOL_DMIDECODE" -eq 1 ]; then
-            dmi_note="${dmi_socks:+；dmidecode 有效插槽 ${dmi_socks}}"
+        # dmi_socks=0 时 "0" 仍是非空字符串，单靠 ${var:+...} 会照样展开，
+        # 所以必须先显式判断 >0（与 L1771 的写法保持一致）。
+        if [ "$TOOL_DMIDECODE" -eq 1 ] && [ "$dmi_socks" -gt 0 ]; then
+            dmi_note="；dmidecode 有效插槽 ${dmi_socks}"
         fi
         add_row "路数判定依据" "${sock_src}${dmi_note}${phys_note}"
     fi
@@ -3204,14 +3213,16 @@ collect_partition_info() {
             # -P pairs 形式 NAME="pmem0" 与 NAME="pmem0p1" 都能被识别。
             out=$(echo "$out" \
                 | grep -vE 'NAME="(loop|ram|zram|dm-|dm|md|sr|fd|nbd|pmem)[0-9p-]*"')
-            src="lsblk -P（结构化）"
         fi
 
-        # ② -P 真不支持的老系统（_p_ok=0）或过滤后仍空（_p_ok=1 但全被虚拟盘滤走）：
-        # 拿 lsblk 默认文本（自带树形 ├─/└─/前缀）。旧版过滤正则是
-        # '^[[:space:]]*(loop|ram|...|pmem)'，但树形前缀后才接真实设备名，
-        # └─pmem0p1 会漏过；先把树形前缀剥掉再 grep，或加 └─/├─ 的变体。
-        if [ -z "$out" ]; then
+        # ② 只有 -P 完全不被支持（_p_ok=0）才回退 plain。若 -P 成功但设备
+        # 全是 loop/pmem 等虚拟盘，过滤后为空是正确结果，不应再回退（否则
+        # plain 里 └─pmem0p1 会重新漏出来）。
+        if [ "$_p_ok" -eq 1 ]; then
+            src="lsblk -P（结构化）"
+        else
+            # plain 自带树形 ├─/└─ 前缀，先剥掉再按前缀过滤；否则
+            # └─pmem0p1 不匹配 ^pmem 会漏网。
             out=$(lsblk -n -o NAME,MAJ:MIN,RM,SIZE,RO,TYPE,MOUNTPOINT 2>/dev/null \
                   | sed 's/^[^A-Za-z0-9]*//' \
                   | grep -vE '^(loop|ram|zram|dm-|dm|md|sr|fd|nbd|pmem)[0-9p-]*([[:space:]]|$)')
@@ -3596,6 +3607,8 @@ collect_disk_perf_info() {
             add_row "fio 顺序写入" "跳过（写入测试不可用）"
             add_blank
         else
+            # 注册到 trap，Ctrl-C/TERM 时清理 fio 写入文件（同样可达 10G+）
+            PERF_TEST_FILE="$test_file2"
             log_info "  [fio] 正在测试顺序写入 (seq write, ${DISK_TEST_SIZE})..."
             fio_out=$(fio --name=seq_write --filename="$test_file2" --direct=1 \
                 --size="$DISK_TEST_SIZE" --rw=write --bs=1M --runtime=30 \
@@ -3604,6 +3617,7 @@ collect_disk_perf_info() {
             row_or_fail "fio 顺序写入带宽"  "$(parse_fio_val "$fio_out" 'BW')" "fio seq_write: ${fio_ctx:-带宽值为空}"
             row_or_fail "fio 顺序写入 IOPS" "$(parse_fio_val "$fio_out" 'IOPS')" "fio seq_write: ${fio_ctx:-IOPS 值为空}"
             rm -f "$test_file2" 2>/dev/null
+            unset PERF_TEST_FILE
             add_blank
         fi
 
@@ -3627,6 +3641,8 @@ collect_disk_perf_info() {
             add_row "fio 4K 随机写入" "跳过（写入测试不可用）"
             add_blank
         else
+            # 注册到 trap，Ctrl-C/TERM 时清理 fio 随机写文件
+            PERF_TEST_FILE="$test_file3"
             log_info "  [fio] 正在测试 4K 随机写入 (randwrite, ${DISK_TEST_SIZE})..."
             fio_out=$(fio --name=rand_write --filename="$test_file3" \
                 --size="$DISK_TEST_SIZE" --rw=randwrite --bs=4k --direct=1 --iodepth=64 \
@@ -3637,6 +3653,7 @@ collect_disk_perf_info() {
             lat=$(parse_fio_lat "$fio_out")
             row_or_fail "fio 4K 随机写入延迟" "$lat" "fio rand_write: ${fio_ctx:-延迟行缺失}"
             rm -f "$test_file3" 2>/dev/null
+            unset PERF_TEST_FILE
             add_blank
         fi
     else
@@ -3664,10 +3681,13 @@ collect_disk_perf_info() {
         if [ -z "$ioping_w_file" ]; then
             add_row "ioping 写入延迟" "跳过（写入测试不可用）"
         else
+            # 注册到 trap，Ctrl-C/TERM 时清理 ioping 写入文件
+            PERF_TEST_FILE="$ioping_w_file"
             ioping_out=$(ioping -c 10 -W "$ioping_w_file" 2>&1)
             ioping_res=$(echo "$ioping_out" | grep "avg" | sed 's/.*avg=\([^ ]*\).*/\1/')
             row_or_fail "ioping 写入延迟" "$ioping_res" "ioping 写入: $(echo "$ioping_out" | tail -1)"
             rm -f "$ioping_w_file" 2>/dev/null
+            unset PERF_TEST_FILE
         fi
         used_tools="${used_tools} + ioping"
         add_blank
@@ -3876,9 +3896,12 @@ main() {
 
     # 可写性必须在加锁之前验证：输出目录不可写时 `exec 200>...lock` 也会
     # 失败，若放在锁之后会被误报成「正被其他实例写入」，把排错方向带偏
-    if ! check_file_writable "$OUTPUT_FILE"; then
+    check_file_writable "$OUTPUT_FILE"
+    local cfw_rc=$?
+    if [ "$cfw_rc" -ne 0 ]; then
         summary_errors
-        return 1
+        # 透传 1/2：目录/特殊文件是参数/路径类型错误（2），其余是 IO 错误（1）
+        return "$cfw_rc"
     fi
 
     # 并发写同一 .xls 会互相踩，flock 可用时上互斥锁；缺失则降级为无锁
