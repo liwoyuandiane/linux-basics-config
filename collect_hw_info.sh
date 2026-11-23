@@ -105,6 +105,19 @@ check_file_writable() {
         record_error "输出路径是符号链接，拒绝写入: ${file_path}"
         return 1
     fi
+    # P1 硬拦截：-o 指向目录 / 字符设备 / 块设备 / FIFO / socket 时，旧版静默
+    # 把节点替换成 16KB XML（实测用 /tmp/fakedev c 1 3 和 /tmp/fakefifo 复现）。
+    # 目录场景退出码为 0 且消息"文件已创建 /existing/dir"，并在目录里残留
+    # .odir.new_XXXXXX 临时文件，批量巡检里会产生假阴性日志 + 磁盘垃圾。
+    # 修复后直接报错 exit 2，与"父路径不存在"语义保持一致。
+    if [ -d "$file_path" ]; then
+        record_error "输出路径是目录，请换成文件名: ${file_path}"
+        return 2
+    fi
+    if [ -b "$file_path" ] || [ -c "$file_path" ] || [ -p "$file_path" ] || [ -S "$file_path" ]; then
+        record_error "输出路径是特殊文件（设备 / FIFO / socket），拒绝写入: ${file_path}"
+        return 2
+    fi
     if [ -f "$file_path" ] && [ ! -w "$file_path" ]; then
         record_error "文件不可写: ${file_path}"
         return 1
@@ -436,10 +449,15 @@ check_tools() {
 # =============================================================================
 xml_esc() {
     [ -z "$1" ] && echo "" && return
-    # 删控制字符必须用八进制 \000-\037：GNU tr 不支持 \xHH 十六进制语法，
-    # '\x00-\x1F' 会被解析成字符范围 0-x（0x30..0x78），把数字、大写字母、
-    # a-w 和冒号一并删光（中文 UTF-8 字节与 y/z 幸存，单元格值只剩残骸）
-    printf '%s\n' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' | tr -d '\000-\037'
+    # 1) XML 特殊字符先 replace（& 必须先于 < > "）；
+    # 2) 换行 / 回车 / tab 用空格替代，避免把多行单元格值直接粘成一串
+    #    （例如 smartctl "12345\n 678" 的两行会连成 "12345 678" 可读，
+    #    旧版直接删除则变成 "12345678"）；
+    # 3) 其他控制字符（0x00-0x08, 0x0B-0x1F）必须删除：XML 1.0 不接受。
+    printf '%s\n' "$1" \
+        | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g' \
+        | tr '\n\r\t' '   ' \
+        | tr -d '\000-\010\013-\037'
 }
 
 get_system_sn() {
@@ -793,6 +811,8 @@ SMART_ENV_IS_VM=0               # 是否虚拟机 / 云主机 / 虚拟块设备
 SMART_ENV_DESC=""               # 运行环境描述
 SMART_ENV_REASON=""             # 判定依据
 SMART_NATIVE_FAIL_REASON=""     # 内嵌探针不可用的真实原因（无 python3 / 自检失败 / 写不了临时文件）
+PERF_TEST_FILE=""               # 当前性能测试 mktemp 文件路径；EXIT/INT/TERM trap 用来清理大文件
+LOCK_FILE=""                    # 当前输出文件的 flock 载体；EXIT trap 只关 FD，不删文件
 SCRIPT_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
 [ -z "$SCRIPT_DIR" ] && SCRIPT_DIR="."
 
@@ -800,11 +820,21 @@ cleanup_smart_runtime() {
     if [ "$SMART_PROBE_IS_TMP" -eq 1 ] && [ -n "$SMART_PROBE_PY" ] && [ -f "$SMART_PROBE_PY" ]; then
         rm -f "$SMART_PROBE_PY" 2>/dev/null
     fi
-    # 锁文件只是 flock 的载体，进程退出即解锁；不删会永久残留在输出目录
-    # （U盘交付场景下尤其显眼），必须由持有者自己清理
+    # 若性能测试中途退出（Ctrl-C / TERM），mktemp 生成的 .disk_write_test_*
+    # 会留在磁盘上（最大可达 DISK_TEST_SIZE，巡检时可能 10G+）。
+    # 仅在非 blockdev TEST_FILE_DIR 上尝试清理，避免误删块设备节点。
+    if [ -n "${PERF_TEST_FILE:-}" ] && [ -f "${PERF_TEST_FILE}" ] \
+        && [ ! -b "${PERF_TEST_FILE}" ] && [ ! -c "${PERF_TEST_FILE}" ]; then
+        rm -f "${PERF_TEST_FILE}" 2>/dev/null
+    fi
+    # 锁文件：**永不删除**。
+    # 旧版 EXIT trap rm 锁文件会触发经典 TOCTOU 并发 bug：持有者刚解锁、
+    # trap 把 inode 删掉、等待者此时才 flock（旧 inode 被解锁）、新进程立刻
+    # 创 inode 又 flock 成功，三者同时进入临界区，丢页签 + 重号 + 全 exit 0。
+    # flock 与文件描述符绑定，进程退出后内核自动释放；残留的 .lock 只是个
+    # 空文件载体，不影响正确性、也不影响交付（README 已同步更新）。
     if [ -n "${LOCK_FILE:-}" ]; then
         exec 200>&- 2>/dev/null
-        rm -f "$LOCK_FILE" 2>/dev/null
     fi
 }
 trap cleanup_smart_runtime EXIT INT TERM
@@ -1786,7 +1816,14 @@ collect_cpu_info() {
     else
         local phys_note=""
         [ "$x86" -eq 1 ] && [ "$phys_ids" -gt 0 ] && phys_note="；physical id 去重 ${phys_ids}"
-        add_row "路数判定依据" "${sock_src}${dmi_socks:+；dmidecode 有效插槽 ${dmi_socks}}${phys_note}"
+        # 只有 dmidecode 真跑了才提"dmidecode 有效插槽"；否则 TOOL_DMIDECODE=0
+        # 时 dmi_socks 被初始化成 0，会出现"有效插槽 0"这种误导行（非 root
+        # 虚拟机 ARM 平台实测复现）。
+        local dmi_note=""
+        if [ "$TOOL_DMIDECODE" -eq 1 ]; then
+            dmi_note="${dmi_socks:+；dmidecode 有效插槽 ${dmi_socks}}"
+        fi
+        add_row "路数判定依据" "${sock_src}${dmi_note}${phys_note}"
     fi
 
     # 每颗 CPU 明细：单路时型号/核心/线程/频率与上方汇总完全重复，省略；
@@ -2656,11 +2693,16 @@ collect_gpu_info() {
                 local gpu_desc; gpu_desc=$(echo "$line" | sed 's/^[0-9a-f:. ]* //')
 
                 local gpu_type="其他/未识别"
-                echo "$gpu_desc" | grep -qi "NVIDIA"           && gpu_type="NVIDIA"
-                echo "$gpu_desc" | grep -qi "AMD\|ATI\|Radeon" && gpu_type="AMD"
-                echo "$gpu_desc" | grep -qi "Intel"            && gpu_type="Intel"
-                echo "$gpu_desc" | grep -qi "Phytium\|飞腾\|X100\|DC Controller" && gpu_type="飞腾/国产显示控制器"
-                echo "$gpu_desc" | grep -qi "Loongson\|兆芯\|海光\|景嘉微\|JM9\|摩尔\|芯瞳\|格兰菲" && gpu_type="国产 GPU"
+                echo "$gpu_desc" | grep -qiE "(^|[^A-Za-z0-9])(NVIDIA)([^A-Za-z0-9]|$)" && gpu_type="NVIDIA"
+                # BusyBox grep 不支持 \b，改用字符类 (^|[^A-Za-z0-9]) 模拟词边界。
+                # 旧版 `grep -qi "AMD\|ATI\|Radeon"` 会命中 "Corporati**on**" 里的
+                # "ATI"，导致任何未装 nvidia-smi 的 NVIDIA 卡在 lspci 回退路径上
+                # 被误判成 AMD（RTX 3090 实测复现）。这里 AMD/ATI 加边界保护；
+                # Radeon 本身含字符，单独一项也避免误匹配。
+                echo "$gpu_desc" | grep -qiE "(^|[^A-Za-z0-9])(AMD|ATI|Radeon)([^A-Za-z0-9]|$)" && gpu_type="AMD"
+                echo "$gpu_desc" | grep -qiE "(^|[^A-Za-z0-9])(Intel)([^A-Za-z0-9]|$)" && gpu_type="Intel"
+                echo "$gpu_desc" | grep -qiE "Phytium|飞腾|X100|DC Controller" && gpu_type="飞腾/国产显示控制器"
+                echo "$gpu_desc" | grep -qiE "Loongson|兆芯|海光|景嘉微|JM9|摩尔|芯瞳|格兰菲" && gpu_type="国产 GPU"
 
                 add_row "GPU (${pci_addr})" "${gpu_type} · $(short_pci_desc "$gpu_desc")"
             done <<< "$gpus"
@@ -2912,12 +2954,18 @@ collect_driver_versions() {
     # 「版本 | 路径 | 来源」整串塞进一个跨 2~6 列的单元格，在六列表格里
     # 看起来像全挤在「类型」列，且后续软件无法复用列位。
     # 要加 nginx / openssl 等，照下面这行继续 add_rowN 即可，表格结构不用改。
-    local sshd_info sver spath ssrc
+    local sshd_info sver spath ssrc sshd_src_cell
     sshd_info=$(sshd_version_info)
     IFS='|' read -r sver spath ssrc <<< "$sshd_info"
-    local sloc="${spath:-未提供}"
-    add_rowN "sshd (SSH 服务端)" "软件" "—" "${sver:-未提供}" "—" \
-             "${ssrc:-未提供}（${sloc}）"
+    # 旧版无条件拼 "${ssrc:-未提供}（${sloc}）"，当 sshd 未安装时 ssrc="未获取到"
+    # 且 spath 为空，最终呈现为 "未获取到（未提供）"，既冗余也误导。
+    # 改成：有路径才加括号；source 列若也为空则直接给 "未获取到"。
+    if [ -n "${spath}" ]; then
+        sshd_src_cell="${ssrc:-未获取到}（${spath}）"
+    else
+        sshd_src_cell="${ssrc:-未获取到}"
+    fi
+    add_rowN "sshd (SSH 服务端)" "软件" "—" "${sver:-未提供}" "—" "${sshd_src_cell}"
     rows=$((rows + 1))
 }
 
@@ -3136,24 +3184,37 @@ collect_partition_info() {
 
     if [ "$TOOL_LSBLK" -eq 1 ]; then
         # ① 结构化 -P：按列分级回退（老 util-linux 可能没有 PTTYPE / UUID / PKNAME）
+        # 注意：lsblk -P 即使输出为空（系统上只剩 pmem 虚拟设备）也返回 rc=0，
+        # 因此不能用 rc 判 -P 是否"被支持"，必须单独记一个 _p_ok 标志。
+        local _p_ok=0
         for cols in \
             "NAME,MAJ:MIN,RM,SIZE,RO,TYPE,MOUNTPOINT,PKNAME,FSTYPE,UUID,LABEL,PTTYPE" \
             "NAME,MAJ:MIN,RM,SIZE,RO,TYPE,MOUNTPOINT,PKNAME,FSTYPE,UUID,LABEL" \
             "NAME,MAJ:MIN,RM,SIZE,RO,TYPE,MOUNTPOINT,PKNAME,FSTYPE" \
             "NAME,MAJ:MIN,RM,SIZE,RO,TYPE,MOUNTPOINT,PKNAME" \
             "NAME,SIZE,TYPE,MOUNTPOINT,PKNAME"; do
-            out=$(lsblk -P -n -o "$cols" 2>/dev/null)
+            local _p_rc=0
+            out=$(lsblk -P -n -o "$cols" 2>/dev/null) || _p_rc=$?
+            if [ "$_p_rc" -eq 0 ]; then _p_ok=1; fi
             [ -n "$out" ] && break
-            out=""
         done
-        [ -n "$out" ] && out=$(echo "$out" \
-            | grep -vE 'NAME="(loop|ram|zram|dm-|md|sr|fd|nbd|pmem)')
-        src="lsblk -P（结构化）"
+        if [ -n "$out" ]; then
+            # 过滤内核虚拟盘：必须精确匹配引号内以 loop/ram/.../pmem 开头，
+            # 避免 hyperloop0p1 之类的真实盘名被 substring 匹配误伤。
+            # -P pairs 形式 NAME="pmem0" 与 NAME="pmem0p1" 都能被识别。
+            out=$(echo "$out" \
+                | grep -vE 'NAME="(loop|ram|zram|dm-|dm|md|sr|fd|nbd|pmem)[0-9p-]*"')
+            src="lsblk -P（结构化）"
+        fi
 
-        # ② -P 不被支持的老系统：拿 lsblk 原样文本（自带树形），细节用 blkid 补
+        # ② -P 真不支持的老系统（_p_ok=0）或过滤后仍空（_p_ok=1 但全被虚拟盘滤走）：
+        # 拿 lsblk 默认文本（自带树形 ├─/└─/前缀）。旧版过滤正则是
+        # '^[[:space:]]*(loop|ram|...|pmem)'，但树形前缀后才接真实设备名，
+        # └─pmem0p1 会漏过；先把树形前缀剥掉再 grep，或加 └─/├─ 的变体。
         if [ -z "$out" ]; then
             out=$(lsblk -n -o NAME,MAJ:MIN,RM,SIZE,RO,TYPE,MOUNTPOINT 2>/dev/null \
-                  | grep -vE '^[[:space:]]*(loop|ram|zram|dm-|md|sr|fd|nbd|pmem)')
+                  | sed 's/^[^A-Za-z0-9]*//' \
+                  | grep -vE '^(loop|ram|zram|dm-|dm|md|sr|fd|nbd|pmem)[0-9p-]*([[:space:]]|$)')
             src="lsblk 原样文本 + blkid"
         fi
     fi
@@ -3490,6 +3551,10 @@ collect_disk_perf_info() {
         if [ -z "$test_file" ]; then
             write_ok=0
             record_error "无法在 ${TEST_FILE_DIR} 创建写测试文件，跳过后续写测试"
+        else
+            # 注册到全局 trap 变量，让 EXIT/INT/TERM 时 cleanup_smart_runtime
+            # 可以把大文件清掉（默认 DISK_TEST_SIZE 可达 10G+，Ctrl-C 会残留）
+            PERF_TEST_FILE="$test_file"
         fi
     fi
     if [ -z "$test_file" ]; then
@@ -3500,6 +3565,8 @@ collect_disk_perf_info() {
         dd_write_speed=$(parse_dd_speed "$dd_write_out")
         row_or_fail "dd 顺序写入 (bs=1M)" "$dd_write_speed" "dd 写入 ${test_file}: $(echo "$dd_write_out" | tail -1)"
         rm -f "$test_file" 2>/dev/null
+        # 清理后立刻 unset，避免 trap 里重复尝试删除已不存在的路径
+        unset PERF_TEST_FILE
     fi
     add_blank
 
@@ -3817,8 +3884,21 @@ main() {
     # 并发写同一 .xls 会互相踩，flock 可用时上互斥锁；缺失则降级为无锁
     # （老系统/精简环境可能没 flock，不能因此拦住导出）
     if command -v flock &>/dev/null; then
-        if ! { exec 200>"${OUTPUT_FILE}.lock"; } 2>/dev/null; then
-            record_error "无法创建写锁文件（检查输出目录写权限）: ${OUTPUT_FILE}.lock"
+        LOCK_FILE="${OUTPUT_FILE}.lock"
+        # P1 安全：拒绝符号链接和非普通文件，避免 root 被预埋 symlink 顺着链
+        # 覆盖任意目标；>> 打开代替 > 打开，防止已有锁文件被截断。
+        if [ -L "$LOCK_FILE" ]; then
+            record_error "锁文件路径是符号链接，拒绝创建: ${LOCK_FILE}"
+            summary_errors
+            return 1
+        fi
+        if [ -e "$LOCK_FILE" ] && [ ! -f "$LOCK_FILE" ]; then
+            record_error "锁文件路径被非普通文件占用，拒绝创建: ${LOCK_FILE}"
+            summary_errors
+            return 1
+        fi
+        if ! { exec 200>>"$LOCK_FILE"; } 2>/dev/null; then
+            record_error "无法创建写锁文件（检查输出目录写权限）: ${LOCK_FILE}"
             summary_errors
             return 1
         fi
@@ -3917,14 +3997,18 @@ XLSHEAD
         log_info "文件已创建: ${OUTPUT_FILE}"
     else
         # 追加前校验结构：非空、含 <Workbook、最后一个非空行恰为 </Workbook>。
-        # 被外部改坏/半截的文件直接拒收，否则 sed 删行会把损坏固化
-        local tail_line struct_ok=1
+        # 被外部改坏/半截的文件直接拒收，否则 sed 删行会把损坏固化。
+        # CRLF 文件（Excel 另存时产生）需要先剥 \r 再比尾行，否则
+        # '</Workbook>\r' != '</Workbook>' 会把合法文件误判为结构异常。
+        local tail_line struct_ok=1 tail_text
         [ -s "$OUTPUT_FILE" ] || struct_ok=0
         grep -q '<Workbook' "$OUTPUT_FILE" 2>/dev/null || struct_ok=0
         tail_line=$(awk 'NF{l=NR} END{print l+0}' "$OUTPUT_FILE" 2>/dev/null)
-        if [ "$tail_line" -eq 0 ] 2>/dev/null \
-            || [ "$(sed -n "${tail_line}p" "$OUTPUT_FILE" 2>/dev/null)" != "</Workbook>" ]; then
+        if [ "$tail_line" -eq 0 ] 2>/dev/null; then
             struct_ok=0
+        else
+            tail_text=$(sed -n "${tail_line}p" "$OUTPUT_FILE" 2>/dev/null | tr -d '\r\n')
+            [ "$tail_text" != "</Workbook>" ] && struct_ok=0
         fi
         if [ "$struct_ok" -ne 1 ]; then
             record_error "输出文件结构异常，拒绝追加（可能已损坏或被外部修改）: ${OUTPUT_FILE}"
