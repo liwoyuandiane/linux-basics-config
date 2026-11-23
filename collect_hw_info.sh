@@ -6,7 +6,8 @@
 #         资产盘点 / 巡检台账直接复制；重复执行在同一文件追加新页签。
 # 环境  : Kylin / CentOS / Ubuntu / Debian / Fedora 等主流 Linux。
 #         无需联网、无需安装软件包；缺失命令自动跳过，不中断导出。
-# 交付  : 单个 .xls，6 列紧凑表格（列宽整表共用），彩色样式 + 合并单元格。
+# 交付  : 单个 .xls，6 列紧凑表格（列宽整表共用），彩色样式 + 合并单元格；
+#         单文件最多 255 个页签，达到上限即报错并提示备份删除后重试，不自动分卷。
 #         七节（标题按各节实际采集内容命名）：
 #         一、基本信息与系统版本 / 二、CPU 信息 / 三、内存信息 /
 #         四、硬盘与 SMART 通电信息 / 五、网卡信息 /
@@ -25,7 +26,7 @@
 # 注释约定：'# ====' 分章节，'# ----' 分小节，'#' 说明设计意图与已知坑。
 # =============================================================================
 
-SCRIPT_VERSION="5.22.4"
+SCRIPT_VERSION="5.24.0"
 SCRIPT_NAME=$(basename "$0")
 
 # ---- 硬盘性能测试配置 ----
@@ -38,6 +39,12 @@ TEST_FILE_DIR_SET=0           # 用户是否显式给了 -p（默认 /tmp 不做
 # 若直接展开 DISK_TEST_SIZE，-s 5G -h 会把用户本次取值冒充成默认值
 DISK_TEST_SIZE_DEFAULT="$DISK_TEST_SIZE"
 TEST_FILE_DIR_DEFAULT="$TEST_FILE_DIR"
+
+# ---- 单文件页签上限 ----
+# 本脚本只维护一份 .xls，最多 255 个页签；达到上限后拒绝追加并提示备份删除。
+# 不做自动分卷：同目录出现多份编号文件、前部卷被删除后序号回退/重号，
+# 都会让资产台账错位；宁可明确报错，由人决定何时归档重开。
+MAX_SHEETS=255
 
 # ---- 全局工具检测标志 ----
 TOOL_DMIDECODE=0
@@ -139,7 +146,7 @@ show_help() {
   -o, --output <文件>           指定输出 .xls 文件（默认 <输出目录>/collect_hw_info.xls）
   --                            结束选项解析，其后仅作输出目录
 
-输出:  <输出目录>/collect_hw_info.xls（-o 优先）
+输出:  <输出目录>/collect_hw_info.xls（单文件最多 ${MAX_SHEETS} 页签，满后报错；-o 优先）
        参数错误 exit 2；完整说明用 --help-full（内置，单文件离线可查）
 EOF
     exit 0
@@ -160,6 +167,15 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   （Kylin/飞腾机器常回 "Not Set"）时自动改用第一块硬盘 SN，再退回主机名。
   序号前缀必须保留：Excel 不允许同名页签。
   -o 可直接指定输出文件名与路径，父目录不存在会自动创建。
+  单文件上限：最多 ${MAX_SHEETS} 个页签（001~${MAX_SHEETS}）。达到上限后再次执行
+  会报错退出（exit 1），日志提示先备份、再删除该 .xls 后重试；新文件从 001
+  重新编号。脚本不会自动分卷、不会新建 collect_hw_info1.xls 之类的文件，
+  目录里始终只有一份汇总 .xls（-o 指定名字时以该名字为准）。
+  ${MAX_SHEETS} 是本脚本设定的硬上限：Excel 官方规格里工作表数是「受可用内存
+  限制」，取 255 是给批量巡检一个明确、可预期的边界，避免单个文件无限膨胀。
+  并发执行时多个实例会有限等待（最多约 60 秒）后依次写入同一文件，不会重号。
+  目录里若残留旧版分卷产生的 collect_hw_info1.xls / 2.xls，本版不会读取，
+  请人工归档；想继续沿用其中的数据，把它改名为基础文件名再执行即可。
 
 2. 报表章节（v5.22 起七节，一个模块一个序号，无补充章节；合并节标题按实际内容命名）
   一、基本信息与系统版本
@@ -263,7 +279,8 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   写测试路径提示等用 [INFO]，不计入警告；汇总行本身不带前缀。
   退出码：参数错误 exit 2；采集/写盘/加锁等硬错误 exit 1；性能项缺值
   （dd/fio/ioping 没拿到数值、测试目录空间不足）只记警告、不判失败，
-  硬件信息照常交付。
+  硬件信息照常交付。页签数达到 ${MAX_SHEETS} 上限也按硬错误 exit 1，
+  并打印"备份 → 删除 → 重试"的具体操作提示。
   -o 优先于位置参数；输出父目录不存在时自动创建。
   -- 之后的参数一律按输出目录处理；输出目录重复指定会报错。
   -s 接受 数字+K/M/G（大小写均可），如 10G / 512m。
@@ -3697,6 +3714,19 @@ get_max_sheet_num() {
     [ -n "$nums" ] && echo "$(echo "$nums" | tail -1)" || echo "0"
 }
 
+# 统计文件里的页签个数（按 <Worksheet 起始标签出现次数，不按行数），
+# 用于单文件 255 上限判断。外部把 XML 压成单行时也不会漏计；10# 归一
+# 避免 wc 输出被当八进制。与 get_max_sheet_num 分开：个数管"满没满"，
+# 最大序号管"下一个编号是多少"，两者互不替代。
+count_sheets() {
+    local file="$1" n
+    [ ! -f "$file" ] && { echo "0"; return 0; }
+    n=$(grep -o '<Worksheet ss:Name=' "$file" 2>/dev/null | wc -l)
+    n=$(printf '%s' "${n:-0}" | tr -cd '0-9')
+    [ -z "$n" ] && n=0
+    echo "$((10#$n))"
+}
+
 # =============================================================================
 # 主流程
 # =============================================================================
@@ -3704,7 +3734,7 @@ main() {
     echo ""
     echo "=============================================="
     echo "  Linux 硬件配置信息导出工具 v${SCRIPT_VERSION}"
-    echo "  交付: Excel XML Spreadsheet (.xls) · 6 列紧凑表格 · 多页签追加"
+    echo "  交付: Excel XML Spreadsheet (.xls) · 6 列紧凑表格 · 单文件最多 ${MAX_SHEETS} 页签"
     echo "  采集: 七节 · 基本信息与系统版本 / CPU / 内存 / 硬盘与SMART通电 / 网卡 / GPU·驱动·软件版本 / 分区挂载"
     echo "  离线: 单文件免安装，SMART 四级后端回退；-d 可附硬盘性能测试"
     echo "=============================================="
@@ -3744,7 +3774,7 @@ main() {
     if [ -f "$OUTPUT_FILE" ] \
        && { grep -q '（补充）' "$OUTPUT_FILE" 2>/dev/null \
             || grep -q '二、系统版本信息' "$OUTPUT_FILE" 2>/dev/null; }; then
-        legacy_hint="检测到本文件已有旧版（v5.21.x 十节编号）页签；本页签为 v5.22.3 七节结构，同文件内章节号会不一致。建议删除本 .xls 后重新生成，或用 -o 另存新文件"
+        legacy_hint="检测到本文件已有旧版（v5.21.x 十节编号）页签；本页签为 v${SCRIPT_VERSION} 七节结构，同文件内章节号会不一致。建议删除本 .xls 后重新生成，或用 -o 另存新文件"
         log_info "检测到旧版章节编号页签：建议删除 ${OUTPUT_FILE} 后重新生成，或用 -o 另存新文件（避免同文件混用两套编号）"
     fi
 
@@ -3795,17 +3825,45 @@ main() {
             summary_errors
             return 1
         fi
-        if ! flock -n 200; then
+        # -n 非阻塞：两个实例同时启动会有一个抢不到锁直接 exit 1，批量并发
+        # 巡检就白白丢掉一台机器。改成有限等待（最多约 60 秒），让先持锁者
+        # 写完、后者接着写；util-linux 老版本没有 flock -w，故用「-n +
+        # sleep 1」轮询，仍失败才按原语义报错，不会无限挂住。
+        local _lock_ok=0 _try=0
+        while [ "$_try" -lt 60 ]; do
+            if flock -n 200; then _lock_ok=1; break; fi
+            _try=$((_try + 1))
+            sleep 1
+        done
+        if [ "$_lock_ok" -ne 1 ]; then
             # 失败者绝不能设 LOCK_FILE：否则 EXIT trap 会把持有者的锁文件从
             # 磁盘提前删掉，后续新实例将创建新 inode 加锁成功，互斥失效
             exec 200>&-
-            record_error "无法获取写锁: ${OUTPUT_FILE} 可能正被其他实例写入，或锁文件不可访问"
+            record_error "无法获取写锁: ${OUTPUT_FILE} 长时间被其他实例占用，或锁文件不可访问"
             summary_errors
             return 1
         fi
         # 故意不用 local：cleanup_smart_runtime 由 EXIT trap 触发时 main 已返回，
         # local 变量届时已销毁，锁文件就删不掉了
         LOCK_FILE="${OUTPUT_FILE}.lock"
+    fi
+
+    # ---- 锁内：单文件页签上限 ----
+    # 只认 <输出目录>/collect_hw_info.xls（或 -o 指定的那一个文件），不再分卷。
+    # 达到 255 个页签后拒绝追加：不新建 collect_hw_info1.xls，避免同目录出现
+    # 多套编号；提示备份删除后重试，新文件从 001 开始。放在取号之前、结构
+    # 校验之前，两个并发实例都会看到满并各自报错，不会有一个偷偷写进去。
+    if [ -f "$OUTPUT_FILE" ]; then
+        local sheet_count; sheet_count=$(count_sheets "$OUTPUT_FILE")
+        sheet_count=$(printf '%s' "$sheet_count" | tr -cd '0-9')
+        [ -z "$sheet_count" ] && sheet_count=0
+        sheet_count=$((10#$sheet_count))
+        if [ "$sheet_count" -ge "$MAX_SHEETS" ]; then
+            record_error "输出文件页签数已达上限 ${MAX_SHEETS}（当前 ${sheet_count} 个），拒绝继续追加: ${OUTPUT_FILE}"
+            log_info "处理办法：先备份 ${OUTPUT_FILE}，再删除 ${OUTPUT_FILE} 文件并重试（新文件从 001 开始编号）"
+            summary_errors
+            return 1
+        fi
     fi
 
     # 页签名（Excel 上限 31 字符）：必须在锁内读页签号，否则两个并发实例
