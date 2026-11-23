@@ -25,7 +25,7 @@
 # 注释约定：'# ====' 分章节，'# ----' 分小节，'#' 说明设计意图与已知坑。
 # =============================================================================
 
-SCRIPT_VERSION="5.22.3"
+SCRIPT_VERSION="5.22.4"
 SCRIPT_NAME=$(basename "$0")
 
 # ---- 硬盘性能测试配置 ----
@@ -1927,6 +1927,8 @@ collect_memory_info() {
             local num unit
             num=$(echo "$n" | grep -oE '^[0-9]+' | head -1)
             [ -z "$num" ] && continue
+            # 同上：BIOS 偶有 "08 GB" 之类零填充，直接进 $((...)) 会被当八进制
+            num=$((10#$num))
             unit=$(echo "$n" | grep -oE '[KkMmGgTt][Bb]' | head -1 | tr '[:lower:]' '[:upper:]')
             case "$unit" in
                 KB) total_mb=$((total_mb + (num + 1023) / 1024)) ;;
@@ -3680,10 +3682,17 @@ get_max_sheet_num() {
     local file="$1"
     [ ! -f "$file" ] && echo "0" && return
     local nums
+    # awk 的 +0 强制按十进制解析并去掉前导零：页签名是 "008" 这种零填充串，
+    # 若把字面串直接交给调用方 $((...))，bash 会按八进制解析，008/009 报
+    # "value too great for base"、010 被当成 8，批量汇总第 9 页签起整脚本退出。
+    # 过滤 ^[0-9]+$ 同时挡住 sed 分支里未匹配行的整行输出。
     if echo "test" | grep -oP 'test' &>/dev/null; then
-        nums=$(grep -oP 'ss:Name="\K[0-9]+' "$file" 2>/dev/null | sort -n)
+        nums=$(grep -oP 'ss:Name="\K[0-9]+' "$file" 2>/dev/null \
+               | awk '/^[0-9]+$/{print $1+0}' | sort -n)
     else
-        nums=$(grep 'ss:Name=' "$file" 2>/dev/null | sed 's/.*ss:Name="\([0-9]*\).*/\1/' | sort -n)
+        nums=$(grep 'ss:Name=' "$file" 2>/dev/null \
+               | sed 's/.*ss:Name="\([0-9]*\).*/\1/' \
+               | awk '/^[0-9]+$/{print $1+0}' | sort -n)
     fi
     [ -n "$nums" ] && echo "$(echo "$nums" | tail -1)" || echo "0"
 }
@@ -3803,7 +3812,11 @@ main() {
     # 都读到同一个 N、都写 N+1，后写的覆盖先写的；N>999 时 printf 自然输出
     # 4 位数，配合 max_sn_len 截断仍不会超 31 字符，不做回绕（回绕会撞重名）
     local curr_num; curr_num=$(get_max_sheet_num "$OUTPUT_FILE")
-    local new_num=$((curr_num + 1))
+    # 纵深防御：即便函数被替换或旧文件里混入怪值，也先清洗成纯数字，
+    # 再用 10# 显式指定十进制，杜绝前导零被当八进制（008/009/010…）
+    curr_num=$(printf '%s' "$curr_num" | tr -cd '0-9')
+    [ -z "$curr_num" ] && curr_num=0
+    local new_num=$((10#${curr_num} + 1))
     local sheet_prefix; sheet_prefix=$(printf "%03d" "$new_num")
     local safe_sn; safe_sn=$(echo "$sys_sn" | sed 's/[^a-zA-Z0-9_-]/_/g')
     local max_sn_len=$((27 - ${#sheet_prefix}))
