@@ -26,7 +26,7 @@
 # 注释约定：'# ====' 分章节，'# ----' 分小节，'#' 说明设计意图与已知坑。
 # =============================================================================
 
-SCRIPT_VERSION="5.24.2"
+SCRIPT_VERSION="5.24.3"
 SCRIPT_NAME=$(basename "$0")
 
 # ---- 硬盘性能测试配置 ----
@@ -185,10 +185,14 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   单文件上限：最多 ${MAX_SHEETS} 个页签（001~${MAX_SHEETS}）。达到上限后再次执行
   会报错退出（exit 1），日志提示先备份、再删除该 .xls 后重试；新文件从 001
   重新编号。脚本不会自动分卷、不会新建 collect_hw_info1.xls 之类的文件，
-  目录里始终只有一份汇总 .xls（-o 指定名字时以该名字为准）。
+  目录里始终只有一份汇总 .xls（-o 指定名字时以该名字为准）；同名的
+  .xls.lock 是无害的空锁载体，不算第二份报表。
   ${MAX_SHEETS} 是本脚本设定的硬上限：Excel 官方规格里工作表数是「受可用内存
   限制」，取 255 是给批量巡检一个明确、可预期的边界，避免单个文件无限膨胀。
   并发执行时多个实例会有限等待（最多约 60 秒）后依次写入同一文件，不会重号。
+  锁文件 <输出名>.xls.lock 是 flock 的载体：进程退出后内核自动释放锁，
+  但脚本不会删除这个空文件（避免 TOCTOU 让两进程同时进入临界区）。
+  它不影响交付、也不影响下次执行，可随 .xls 留存或人工清理。
   目录里若残留旧版分卷产生的 collect_hw_info1.xls / 2.xls，本版不会读取，
   请人工归档；想继续沿用其中的数据，把它改名为基础文件名再执行即可。
 
@@ -292,6 +296,8 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   卡后的盘不提供物理通电计数器：显示「未获取到」属预期行为，脚本会识别
   虚拟环境并在 Excel 写明原因，且不计入警告；请在宿主机或物理机采集。
   健康状态显示 OK 仅为设备自评，不代表有完整属性表。物理机读不到才计警告。
+  脚本按 GNU coreutils / GNU grep / GNU sed 编写与验证；BusyBox 等精简
+  环境未在支持范围内（其 grep 词边界、sed 换行处理与 GNU 存在差异）。
 
 8. 命令行约定
   -h 只给简短用法，-H 给本说明，-v 只打印版本号。
@@ -454,7 +460,7 @@ xml_esc() {
     [ -z "$1" ] && echo "" && return
     # 1) XML 特殊字符先 replace（& 必须先于 < > "）；
     # 2) 换行 / 回车 / tab 用空格替代，避免把多行单元格值直接粘成一串
-    #    （例如 smartctl "12345\n 678" 的两行会连成 "12345 678" 可读，
+    #    （例如 smartctl "12345\n 678" 的两行会连成 "12345  678"（含第二行前导空格），
     #    旧版直接删除则变成 "12345678"）；
     # 3) 其他控制字符（0x00-0x08, 0x0B-0x1F）必须删除：XML 1.0 不接受。
     # 用 printf '%s'（不能带 \n）：下面的 tr 会把换行映射成空格，若 printf
@@ -3213,9 +3219,9 @@ collect_partition_info() {
             [ -n "$out" ] && break
         done
         if [ -n "$out" ]; then
-            # 过滤内核虚拟盘：必须精确匹配引号内以 loop/ram/.../pmem 开头，
-            # 避免 hyperloop0p1 之类的真实盘名被 substring 匹配误伤。
-            # -P pairs 形式 NAME="pmem0" 与 NAME="pmem0p1" 都能被识别。
+            # 过滤内核虚拟盘：引号内以 loop/ram/.../pmem 开头且后接
+            # [0-9p-]* 才算虚拟盘（NAME="pmem0" / NAME="pmem0p1" 都命中）。
+            # 边界同时避免误伤 NAME="loopback0" 这类真实盘名。
             out=$(echo "$out" \
                 | grep -vE 'NAME="(loop|ram|zram|dm-|dm|md|sr|fd|nbd|pmem)[0-9p-]*"')
         fi
@@ -3226,11 +3232,14 @@ collect_partition_info() {
         if [ "$_p_ok" -eq 1 ]; then
             src="lsblk -P（结构化）"
         else
-            # plain 自带树形 ├─/└─ 前缀，先剥掉再按前缀过滤；否则
-            # └─pmem0p1 不匹配 ^pmem 会漏网。
+            # plain 自带树形 ├─/└─ 前缀：只做过滤、不剥前缀，否则真实分区的
+            # 树形字符会被一起删掉（CentOS 6 老 util-linux 走这条路径）。
+            # ^[^A-Za-z0-9]* 吃掉树形字符仅用于匹配判断，grep -v 对不匹配的行
+            # 原样输出，所以 ├─sda1 保留；└─pmem0p1 被过滤。
+            # [0-9p-]*([[:space:]]|$) 边界不可省：否则 loopback0 / ramdisk_data
+            # 这类以虚拟盘前缀开头的真实盘名会被误过滤。
             out=$(lsblk -n -o NAME,MAJ:MIN,RM,SIZE,RO,TYPE,MOUNTPOINT 2>/dev/null \
-                  | sed 's/^[^A-Za-z0-9]*//' \
-                  | grep -vE '^(loop|ram|zram|dm-|dm|md|sr|fd|nbd|pmem)[0-9p-]*([[:space:]]|$)')
+                  | grep -vE '^[^A-Za-z0-9]*(loop|ram|zram|dm-|dm|md|sr|fd|nbd|pmem)[0-9p-]*([[:space:]]|$)')
             src="lsblk 原样文本 + blkid"
         fi
     fi

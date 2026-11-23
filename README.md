@@ -111,7 +111,7 @@ cp src/smartctl ../smartctl.aarch64     # 或 ../smartctl.amd64
 
 ### 许可说明
 
-- `collect_hw_info.sh` 为本仓库脚本，其许可由仓库根目录的 `LICENSE` 文件决定（若尚未添加，请按你的意愿补充）。
+- `collect_hw_info.sh` 为本仓库脚本，许可见仓库根目录的 `LICENSE` 文件（MIT）。
 - 随附的两个 `smartctl` 二进制由第三方从 [smartmontools](https://github.com/smartmontools/smartmontools) 源码静态编译，smartmontools 使用 **GNU GPL v2**（见上游 [COPYING](https://github.com/smartmontools/smartmontools/blob/main/COPYING)）。本仓库仅做未经修改的再分发。
 - 若你二次分发这些二进制，请保留上游许可信息并提供源码获取途径（上面的官方仓库 / 源码 tarball 链接）。
 
@@ -151,6 +151,8 @@ sudo bash /media/usb/collect_hw_info.sh /media/usb
 为什么设 255：微软官方规格里工作簿的工作表数是「受可用内存限制」，没有硬性个数上限；255 是**本脚本设定的硬上限**，给批量巡检一个明确、可预期的边界，避免单个 `.xls` 无限膨胀（每次追加都要 `cp` 整份文件做备份 + `sed -i` 重写，文件越大越慢、中断时风险越集中）。不分卷是刻意选择：同目录出现多份编号文件、或前部卷被删后序号回退/重号，都会让资产台账错位——宁可明确报错，由人决定何时归档重开。
 
 并发跑同一份 `.xls` 时多个实例会有限等待（最多约 60 秒）后依次写入，不会抢同一个页签号。`.lock` 是 `flock` 的文件载体：进程退出时内核自动释放锁，但文件本身不会被脚本删除（避免 TOCTOU 导致两进程同时进临界区）。残留的 `.xls.lock` 只是个空文件，不影响交付、也不影响下次执行。
+
+> 验收口径（v5.24.3 起）：旧记录里「`.lock` 残留 0」的断言已作废，应改为「允许存在空的 `.xls.lock` 载体，且并发无重号、无半成品 xls」。
 
 > **从 v5.23.x 升级的注意**：目录里若残留 `collect_hw_info1.xls` / `collect_hw_info2.xls`，本版**不会读取、不会修改、也不会删除**，请人工归档。若想继续沿用其中的数据，把要保留的那份改名为基础文件名再执行即可（例如 `mv collect_hw_info2.xls collect_hw_info.xls`）。`HW_MAX_SHEETS` 环境变量已移除，上限固定 255。
 
@@ -197,6 +199,7 @@ sudo bash /media/usb/collect_hw_info.sh -o "$OUT/hw.xls"
 - **内存 SN**：`dmidecode -t memory` 的 `Serial Number`，「内存条序列号 (SN)」行按插槽逐条列出（明细表第 6 列仍保留 `模组型号 / SN / Rank`）。BIOS 填 `00000000` / `<BAD INDEX>` 等占位值时归一为「—」并说明「以内存条标签为准」，不是脚本没采。
 - **日志口径**：`[WARN]`/`[ERROR]` 行数与「执行结果汇总」计数严格一致；写测试路径提示等说明性信息走 `[INFO]`，不计入警告。
 - **sshd 版本**：老版 OpenSSH（CentOS 6 的 5.3p1、Kylin V10 的 8.2p1）不支持 `sshd -V`，脚本依次回退「服务端二进制版本串 → `ssh -V` → `rpm`/`dpkg-query`」，并在「来源」列写明用了哪一级。
+- **运行环境口径**：脚本按 **GNU coreutils / GNU grep / GNU sed** 编写与验证（目标机型银河麒麟、CentOS、Ubuntu、Debian、Fedora 均为 GNU 环境）。BusyBox / 嵌入式精简环境**未在支持范围内**，其 `grep` 的词边界与 `sed` 的换行处理差异可能让 GPU 类型识别或单元格文本出现偏差；本版不对这些环境做代码级兼容承诺。
 
 ---
 
@@ -306,4 +309,4 @@ Excel XML Spreadsheet 2003 是纯 XML，Bash 直接拼字符串就能生成，�
 
 ---
 
-当前脚本版本：**v5.24.2**（随时可用 `./collect_hw_info.sh -v` 确认）
+当前脚本版本：**v5.24.3**（随时可用 `./collect_hw_info.sh -v` 确认）
