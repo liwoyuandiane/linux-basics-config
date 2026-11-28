@@ -26,7 +26,7 @@
 # 注释约定：'# ====' 分章节，'# ----' 分小节，'#' 说明设计意图与已知坑。
 # =============================================================================
 
-SCRIPT_VERSION="5.24.3"
+SCRIPT_VERSION="5.24.5"
 SCRIPT_NAME=$(basename "$0")
 
 # ---- 硬盘性能测试配置 ----
@@ -181,6 +181,12 @@ ${SCRIPT_NAME} v${SCRIPT_VERSION} — 完整说明
   页签名为 <3位序号>-<设备标识SN>，例如 001-ZFA1BFP9。整机 DMI 序列号读不到
   （Kylin/飞腾机器常回 "Not Set"）时自动改用第一块硬盘 SN，再退回主机名。
   序号前缀必须保留：Excel 不允许同名页签。
+  用 Excel/WPS 删除任意一个页签后另存，再次执行仍按剩余页签的最大序号 +1
+  顺延：有 001/002 时删掉 001 → 写 003；删掉 002 → 写 002（最大号被删就复用
+  该编号，不留空洞、不从头重编）。60 页签删掉 001 → 写 061，不会报错。
+  外部工具重排过的 XML（缩进 / 尾随空格 / ss: 元素与属性前缀 / Name= 无前缀
+  属性 / 闭合标签内空白 / CRLF / BOM / 压成单行）都能识别；但「另存为」
+  二进制 .xls 不是文本 XML，脚本会拒收，此时请用 -o 另存新文件。
   -o 可直接指定输出文件名与路径，父目录不存在会自动创建。
   单文件上限：最多 ${MAX_SHEETS} 个页签（001~${MAX_SHEETS}）。达到上限后再次执行
   会报错退出（exit 1），日志提示先备份、再删除该 .xls 后重试；新文件从 001
@@ -3804,12 +3810,18 @@ get_max_sheet_num() {
     # 若把字面串直接交给调用方 $((...))，bash 会按八进制解析，008/009 报
     # "value too great for base"、010 被当成 8，批量汇总第 9 页签起整脚本退出。
     # 过滤 ^[0-9]+$ 同时挡住 sed 分支里未匹配行的整行输出。
+    # 只从 <Worksheet ... Name="NNN..." 的页签属性里取号：Excel/WPS 删除页签
+    # 后另存可能把元素写成 <ss:Worksheet>、把属性写成 Name=（无 ss: 前缀）或
+    # 单引号；旧版只认 <Worksheet ss:Name= 时会数不到页签，导致 255 上限失效
+    # 且编号悄悄回退到 001（同机同 SN 会生成完全同名页签，Excel 直接打不开）。
+    # (ss:)? 同时覆盖带前缀/无前缀元素，Name=. 的 . 匹配单/双引号，
+    # [^>]* 保证不跨出起始标签（单行压缩 XML 也不串号）。
     if echo "test" | grep -oP 'test' &>/dev/null; then
-        nums=$(grep -oP 'ss:Name="\K[0-9]+' "$file" 2>/dev/null \
+        nums=$(grep -oP '<(ss:)?Worksheet[^>]*Name=.\K[0-9]+' "$file" 2>/dev/null \
                | awk '/^[0-9]+$/{print $1+0}' | sort -n)
     else
-        nums=$(grep 'ss:Name=' "$file" 2>/dev/null \
-               | sed 's/.*ss:Name="\([0-9]*\).*/\1/' \
+        nums=$(grep -oE '<(ss:)?Worksheet[^>]*Name=.[0-9]+' "$file" 2>/dev/null \
+               | sed -E 's/.*Name=.([0-9]+)$/\1/' \
                | awk '/^[0-9]+$/{print $1+0}' | sort -n)
     fi
     [ -n "$nums" ] && echo "$(echo "$nums" | tail -1)" || echo "0"
@@ -3819,10 +3831,12 @@ get_max_sheet_num() {
 # 用于单文件 255 上限判断。外部把 XML 压成单行时也不会漏计；10# 归一
 # 避免 wc 输出被当八进制。与 get_max_sheet_num 分开：个数管"满没满"，
 # 最大序号管"下一个编号是多少"，两者互不替代。
+# 与取号一致，兼容 <ss:Worksheet> 元素前缀、Name=（无 ss: 前缀）与单引号
+# 属性，避免外部工具另存后出现「能追加但上限数不到」的静默失效。
 count_sheets() {
     local file="$1" n
     [ ! -f "$file" ] && { echo "0"; return 0; }
-    n=$(grep -o '<Worksheet ss:Name=' "$file" 2>/dev/null | wc -l)
+    n=$(grep -oE '<(ss:)?Worksheet[^>]*Name=' "$file" 2>/dev/null | wc -l)
     n=$(printf '%s' "${n:-0}" | tr -cd '0-9')
     [ -z "$n" ] && n=0
     echo "$((10#$n))"
@@ -4033,22 +4047,36 @@ XLSHEAD
         fi
         log_info "文件已创建: ${OUTPUT_FILE}"
     else
-        # 追加前校验结构：非空、含 <Workbook、最后一个非空行恰为 </Workbook>。
-        # 被外部改坏/半截的文件直接拒收，否则 sed 删行会把损坏固化。
-        # CRLF 文件（Excel 另存时产生）需要先剥 \r 再比尾行，否则
-        # '</Workbook>\r' != '</Workbook>' 会把合法文件误判为结构异常。
-        local tail_line struct_ok=1 tail_text
+        # 追加前校验（v5.24.4 起，v5.24.5 加固）：只要求「文本形式的
+        # SpreadsheetML + 完整的 Workbook 开闭标签」。v5.24.3 要求「最后一个
+        # 非空行逐字节等于 </Workbook>」，而 Excel/WPS 删除页签后另存会整体
+        # 重排 XML（缩进、尾随空格、ss: 前缀、CRLF、BOM，甚至压成单行），这些
+        # 合法文件会被一律拒收。追加按闭合标签截断（见下），不依赖物理行号。
+        # 闭合标签正则带 [[:space:]]*：XML 允许 ETag 的 > 前有空白（</Workbook >），
+        # 这是合法 XML，旧版会误拒。二进制 .xls 与缺闭合标签的半截文件仍拒收。
+        local struct_ok=1 close_tag raw_n ok_n first_line
         [ -s "$OUTPUT_FILE" ] || struct_ok=0
-        grep -q '<Workbook' "$OUTPUT_FILE" 2>/dev/null || struct_ok=0
-        tail_line=$(awk 'NF{l=NR} END{print l+0}' "$OUTPUT_FILE" 2>/dev/null)
-        if [ "$tail_line" -eq 0 ] 2>/dev/null; then
-            struct_ok=0
-        else
-            tail_text=$(sed -n "${tail_line}p" "$OUTPUT_FILE" 2>/dev/null | tr -d '\r\n')
-            [ "$tail_text" != "</Workbook>" ] && struct_ok=0
-        fi
+        grep -qE '<(ss:)?Workbook([[:space:]>]|$)' "$OUTPUT_FILE" 2>/dev/null || struct_ok=0
+        close_tag=$(grep -oE '</(ss:)?Workbook[[:space:]]*>' "$OUTPUT_FILE" 2>/dev/null | tail -1)
+        [ -n "$close_tag" ] || struct_ok=0
+        # 文本性检查（不依赖 od，v5.24.5）：XML 1.0 不接受 0x00-0x08 / 0x0B-0x0C
+        # / 0x0E-0x1F；前 512 字节里含这些控制字符即判二进制。OLE2 头后紧跟
+        # 大量 NUL，会被这一条挡住。tab/LF/CR 保留，CRLF 文件不误伤。
+        raw_n=$(head -c 512 "$OUTPUT_FILE" 2>/dev/null | wc -c)
+        ok_n=$(head -c 512 "$OUTPUT_FILE" 2>/dev/null \
+               | LC_ALL=C tr -d '\000-\010\013-\014\016-\037' | wc -c)
+        [ "$raw_n" -eq "$ok_n" ] || struct_ok=0
+        # 首行（允许 UTF-8 BOM）必须以 '<' 开头：挡住无 NUL 但首字节非 '<'
+        # 的伪装文件。v5.24.4 的 od 检查在 od 缺失时会整段跳过、把这类文件
+        # 写坏；现在无条件执行，不再有隐式兜底。
+        first_line=$(LC_ALL=C sed -n '1p' "$OUTPUT_FILE" 2>/dev/null)
+        case "$first_line" in
+            '<'*|$'\357\273\277''<'*) ;;
+            *) struct_ok=0 ;;
+        esac
         if [ "$struct_ok" -ne 1 ]; then
-            record_error "输出文件结构异常，拒绝追加（可能已损坏或被外部修改）: ${OUTPUT_FILE}"
+            record_error "输出文件不是可追加的文本 SpreadsheetML（二进制 .xls / 缺 Workbook 开闭标签 / 已损坏），拒绝追加: ${OUTPUT_FILE}"
+            log_info "处理办法：用 -o 另存新文件，或把该文件恢复成 Excel XML Spreadsheet 2003（纯文本 XML）格式"
             summary_errors
             return 1
         fi
@@ -4062,28 +4090,73 @@ XLSHEAD
             return 1
         fi
 
-        # 按校验出的行号删到行尾：'$ d' 只删物理最后一行，若 </Workbook> 后
-        # 还有空行，删空行会残留旧闭合标签，追加后结构错乱
-        sed -i "${tail_line},\$d" "$OUTPUT_FILE"
-        if [ $? -ne 0 ]; then
-            record_error "修改文件失败: ${OUTPUT_FILE}"
-            cp "$backup_file" "$OUTPUT_FILE" 2>/dev/null
+        local append_tmp ws_to_append append_err=""
+        append_tmp=$(mktemp "${out_dir}/.$(basename -- "$OUTPUT_FILE").app_XXXXXX" 2>/dev/null)
+        if [ -z "$append_tmp" ]; then
             rm -f "$backup_file" 2>/dev/null
+            record_error "无法创建临时文件，拒绝追加: ${OUTPUT_FILE}"
             summary_errors
             return 1
         fi
 
-        # 两次追加必须整体成功才算更新：任一失败时文件缺 </Workbook> 已是损坏状态，
-        # 此时要回滚备份并报错，绝不能删备份 + 宣称成功
-        if ! { echo "${ws_xml}" && echo "</Workbook>"; } >> "$OUTPUT_FILE"; then
-            record_error "追加页签失败: ${OUTPUT_FILE}（磁盘满 / 配额 / IO 错误？）"
+        # 新页签与原文件保持同一元素写法：原文件若用 <ss:Worksheet>（根元素
+        # 也可能只声明 xmlns:ss 而无默认命名空间），追加无前缀的 <Worksheet>
+        # 会落进空命名空间、Excel 读不到；这里把开/闭标签一并转成带前缀。
+        # 另一种情况：根元素只声明默认命名空间（无 xmlns:ss），直接追加带
+        # ss: 前缀的属性会 unbound prefix，此时给新页签自身补一份声明。
+        ws_to_append="$ws_xml"
+        if grep -q '<ss:Worksheet' "$OUTPUT_FILE" 2>/dev/null; then
+            ws_to_append=$(printf '%s' "$ws_xml" | sed \
+                -e 's#<Worksheet #<ss:Worksheet #' \
+                -e 's#</Worksheet>#</ss:Worksheet>#')
+        elif ! grep -q 'xmlns:ss=' "$OUTPUT_FILE" 2>/dev/null; then
+            ws_to_append=$(printf '%s' "$ws_xml" | sed \
+                '1s#<Worksheet ss:Name="#<Worksheet xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet" ss:Name="#')
+        fi
+
+        # awk 只剥掉闭合标签及其之后的文本，前面所有页签原样保留：按物理行号
+        # 删尾行时，单行压缩 XML 会被整个删光（生成缺 XML 头的坏文件）。
+        # 闭合标签独占一行时剥完只剩空白，跳过该行；单行 XML 时剥完是整份
+        # 前半段（含全部页签），照常输出。[[:space:]]* 兼容 </Workbook >。
+        if ! awk '
+            {
+                if ($0 ~ /<\/(ss:)?Workbook[[:space:]]*>/) {
+                    line = $0
+                    sub(/<\/(ss:)?Workbook[[:space:]]*>.*$/, "", line)
+                    if (line ~ /[^[:space:]]/) print line
+                    exit
+                }
+                print
+            }
+        ' "$OUTPUT_FILE" > "$append_tmp" 2>/dev/null; then
+            append_err="重建文件失败: ${OUTPUT_FILE}"
+        fi
+
+        # 用捕获到的同名闭合标签收尾（外部工具可能写成 </ss:Workbook>），
+        # 保证开闭标签匹配；printf 而非 echo，避免反斜杠被解释。
+        if [ -z "$append_err" ] \
+           && ! { printf '%s\n' "$ws_to_append"; printf '%s\n' "$close_tag"; } >> "$append_tmp"; then
+            append_err="追加页签失败: ${OUTPUT_FILE}（磁盘满 / 配额 / IO 错误？）"
+        fi
+
+        # 整体写临时文件后原子 mv：与创建分支一致按 umask 定权限，任一失败
+        # 都回滚备份，绝不在目标文件里留下半截内容后宣称成功。
+        if [ -z "$append_err" ]; then
+            chmod "$(printf '%o' "$((0666 & ~0$(umask)))")" "$append_tmp" 2>/dev/null
+            if ! mv -f "$append_tmp" "$OUTPUT_FILE"; then
+                append_err="替换文件失败: ${OUTPUT_FILE}"
+            fi
+        fi
+
+        if [ -n "$append_err" ]; then
             cp "$backup_file" "$OUTPUT_FILE" 2>/dev/null
-            rm -f "$backup_file" 2>/dev/null
+            rm -f "$append_tmp" "$backup_file" 2>/dev/null
+            record_error "$append_err"
             summary_errors
             return 1
         fi
 
-        rm -f "$backup_file" 2>/dev/null
+        rm -f "$backup_file" "$append_tmp" 2>/dev/null
         log_info "文件已更新，页签已追加: ${OUTPUT_FILE}"
     fi
 
